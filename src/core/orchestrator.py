@@ -64,6 +64,7 @@ class ImplementationOrchestrator:
         primary_repo: str,
         issue_number: int,
         *,
+        human_approval_text: str | None = None,
         reporter: RunReporter | None = None,
     ) -> OrchestratorResult:
         """Implement, review, and open a PR when review approves the change."""
@@ -98,6 +99,7 @@ class ImplementationOrchestrator:
                         investigation,
                         approach,
                         primary_repo,
+                        human_approval_text=human_approval_text,
                     )
             except AgentError as exc:
                 history.append(
@@ -129,6 +131,7 @@ class ImplementationOrchestrator:
                         investigation,
                         implementation,
                         primary_repo,
+                        human_approval_text=human_approval_text,
                     )
             except AgentError as exc:
                 history.append(

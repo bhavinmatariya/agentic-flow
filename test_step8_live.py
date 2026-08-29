@@ -34,7 +34,7 @@ from core.exceptions import EnvironmentSetupError
 from tools.browser_test import BrowserTestTool
 from tools.code_search import CodeSearchTool
 from tools.db_verifier import DBVerifierTool
-from tools.environment_manager import EnvironmentManager
+from tools.environment_manager import EnvironmentManager, checkout_git_branch
 
 DEFAULT_FRONTEND_URL = "http://127.0.0.1:3000"
 DEFAULT_BACKEND_URL = "http://127.0.0.1:8000"
@@ -125,7 +125,12 @@ def main() -> int:
                 settings.github_repo,
                 settings.github_token,
             )
-            _checkout_branch(local_repo_path, args.branch)
+            checkout_git_branch(
+                local_repo_path,
+                args.branch,
+                settings.github_repo,
+                settings.github_token,
+            )
 
         return _run_live_path(
             local_repo_path=local_repo_path,
@@ -284,24 +289,6 @@ def _seed_sqlite_demo_row(
             (marker, "demo-row"),
         )
         conn.commit()
-
-
-def _checkout_branch(local_repo_path: str, branch_name: str) -> None:
-    for command in (
-        ["git", "fetch", "origin", branch_name, "--depth", "1"],
-        ["git", "checkout", branch_name],
-    ):
-        completed = subprocess.run(
-            command,
-            cwd=local_repo_path,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise EnvironmentSetupError(
-                f"Could not checkout {branch_name!r}: {completed.stderr or completed.stdout}"
-            )
 
 
 if __name__ == "__main__":

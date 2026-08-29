@@ -807,3 +807,94 @@ class EnvironmentManager:
         except subprocess.TimeoutExpired:
             handle.kill()
             handle.wait(timeout=5)
+
+
+def authenticated_git_remote_url(repo_full_name: str, github_token: str) -> str:
+    """Build an HTTPS GitHub remote URL that includes token authentication."""
+    owner, _, name = repo_full_name.strip().partition("/")
+    if not owner or not name:
+        raise EnvironmentSetupError(
+            f"Invalid repository slug {repo_full_name!r}; expected owner/name."
+        )
+    token = github_token.strip()
+    if not token:
+        raise EnvironmentSetupError("github_token must not be empty for git operations.")
+    return f"https://x-access-token:{token}@github.com/{owner}/{name}.git"
+
+
+def mask_github_token(text: str, github_token: str) -> str:
+    """Redact token substrings before logging git command or error output."""
+    masked = text.replace(github_token, "***") if github_token else text
+    return re.sub(
+        r"https://x-access-token:[^@\s]+@",
+        "https://x-access-token:***@",
+        masked,
+    )
+
+
+def checkout_git_branch(
+    local_repo_path: str,
+    branch_name: str,
+    repo_full_name: str,
+    github_token: str,
+    *,
+    logger: logging.Logger | None = None,
+) -> None:
+    """Point origin at an authenticated remote, fetch, and check out a branch."""
+    log = logger or get_logger(__name__)
+    token = github_token.strip()
+    remote_url = authenticated_git_remote_url(repo_full_name, token)
+    repo_path = Path(local_repo_path)
+    if not repo_path.is_dir():
+        raise EnvironmentSetupError(
+            f"Local repository path does not exist: {local_repo_path!r}"
+        )
+
+    env = os.environ.copy()
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+
+    def run_git(args: list[str], action: str) -> None:
+        log.debug("%s", mask_github_token(action, token))
+        try:
+            completed = subprocess.run(
+                args,
+                cwd=str(repo_path),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise EnvironmentSetupError(
+                mask_github_token(f"{action} timed out after 120s", token)
+            ) from exc
+        except OSError as exc:
+            raise EnvironmentSetupError(
+                mask_github_token(f"{action} failed to start: {exc}", token)
+            ) from exc
+
+        if completed.returncode != 0:
+            detail = mask_github_token(
+                (completed.stderr or completed.stdout or "").strip(),
+                token,
+            )
+            if detail:
+                message = f"{action} failed (exit {completed.returncode}): {detail}"
+            else:
+                message = f"{action} failed (exit {completed.returncode})"
+            raise EnvironmentSetupError(mask_github_token(message, token))
+
+    run_git(
+        ["git", "remote", "set-url", "origin", remote_url],
+        f"git remote set-url origin for {repo_full_name}",
+    )
+    run_git(
+        ["git", "fetch", "origin", branch_name, "--depth", "1"],
+        f"git fetch origin {branch_name}",
+    )
+    run_git(
+        ["git", "checkout", branch_name],
+        f"git checkout {branch_name}",
+    )
+    log.info("Checked out branch %r in %s", branch_name, local_repo_path)

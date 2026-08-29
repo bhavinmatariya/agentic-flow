@@ -182,6 +182,8 @@ class ImplementerAgent(BaseAgent):
         investigation: Investigation,
         approach: Approach,
         primary_repo: str,
+        *,
+        human_approval_text: str | None = None,
     ) -> ImplementationResult:
         """Apply ``approach`` on a dedicated branch and return the outcome.
 
@@ -211,6 +213,7 @@ class ImplementerAgent(BaseAgent):
             primary_repo=primary_repo,
             branch_name=branch_name,
             local_repo_path=local_repo_path,
+            human_approval_text=human_approval_text,
         )
         result = self.run(user_message, ImplementationResult)
         if result.branch_name != branch_name:
@@ -231,6 +234,7 @@ class ImplementerAgent(BaseAgent):
         primary_repo: str,
         branch_name: str,
         local_repo_path: str,
+        human_approval_text: str | None = None,
     ) -> str:
         """Assemble the user turn from issue, investigation, and approach context."""
         issue_body = str(issue.get("body") or "").strip() or "(empty)"
@@ -251,6 +255,10 @@ class ImplementerAgent(BaseAgent):
             )
         else:
             questions_block = "(none)"
+        approval_block = (
+            str(human_approval_text or "").strip()
+            or "(no human approval comment provided)"
+        )
 
         return (
             "Implement the approved fix approach.\n\n"
@@ -259,6 +267,8 @@ class ImplementerAgent(BaseAgent):
             f"Local checkout path: {local_repo_path}\n\n"
             f"Issue #{issue['number']}: {issue['title']}\n\n"
             f"Issue body:\n{issue_body}\n\n"
+            f"Human approval / feedback (apply every literal detail from this text):\n"
+            f"{approval_block}\n\n"
             f"Issue nature:\n{investigation.issue_nature}\n\n"
             f"Root cause:\n{investigation.root_cause}\n\n"
             f"Evidence:\n{evidence_block}\n\n"

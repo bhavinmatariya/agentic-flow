@@ -22,7 +22,7 @@ from tools.browser_test import (
 )
 from tools.code_search import CodeSearchTool
 from tools.db_verifier import DBVerifierTool
-from tools.environment_manager import EnvironmentManager
+from tools.environment_manager import EnvironmentManager, checkout_git_branch
 
 _FRONTEND_MARKERS: Final[tuple[str, ...]] = (
     "frontend/",
@@ -98,6 +98,12 @@ REVIEWER_SYSTEM_PROMPT: Final[str] = (
     "database you just created.\n\n"
     "When live verification does not apply, set ui_verification and "
     "db_verification to null.\n\n"
+    "Extract every concrete literal detail mentioned in the human's request or "
+    "approved approach (exact colors, copy/text, specific values, named "
+    "behaviors). Check the actual diff against each one individually. If any "
+    "literal detail was not applied, set approved=false and name the missing "
+    "detail explicitly in findings — do not approve just because the code runs "
+    "or looks reasonable.\n\n"
     "Respond with ONLY JSON: {\"approved\": bool, \"summary\": str, "
     "\"findings\": [str], \"layers_detected\": {\"frontend\": bool, "
     "\"database\": bool, \"backend\": bool}, \"ui_verification\": object|null, "
@@ -163,10 +169,18 @@ class ReviewerAgent(BaseAgent):
         investigation: Investigation,
         implementation: ImplementationResult,
         primary_repo: str,
+        *,
+        human_approval_text: str | None = None,
     ) -> ReviewResult:
         """Review ``implementation`` on its branch and return a :class:`ReviewResult`."""
         local_repo_path = self._code_search.clone_repo(primary_repo, self._github_token)
-        self._checkout_branch(local_repo_path, implementation.branch_name)
+        checkout_git_branch(
+            local_repo_path,
+            implementation.branch_name,
+            primary_repo,
+            self._github_token,
+            logger=self._logger,
+        )
         layers = detect_change_layers(implementation.files_changed)
         default_effort = self._settings.agent_config("reviewer").effort
         self._review_context = {
@@ -176,6 +190,7 @@ class ReviewerAgent(BaseAgent):
             "primary_repo": primary_repo,
             "local_repo_path": local_repo_path,
             "layers": layers,
+            "human_approval_text": human_approval_text,
         }
 
         if layers.get("frontend") and layers.get("database"):
@@ -191,6 +206,7 @@ class ReviewerAgent(BaseAgent):
             primary_repo=primary_repo,
             local_repo_path=local_repo_path,
             layers=layers,
+            human_approval_text=human_approval_text,
         )
         try:
             return self.run(user_message, ReviewResult)
@@ -257,10 +273,15 @@ class ReviewerAgent(BaseAgent):
         primary_repo: str,
         local_repo_path: str,
         layers: dict[str, bool],
+        human_approval_text: str | None = None,
         live_verification_note: str | None = None,
     ) -> str:
         issue_body = str(issue.get("body") or "").strip() or "(empty)"
         files_block = "\n".join(f"- {path}" for path in implementation.files_changed) or "(none)"
+        approval_block = (
+            str(human_approval_text or "").strip()
+            or "(no human approval comment provided)"
+        )
         message = (
             "Review this implemented fix.\n\n"
             f"Primary repository: {primary_repo}\n"
@@ -268,6 +289,8 @@ class ReviewerAgent(BaseAgent):
             f"Local checkout path: {local_repo_path}\n\n"
             f"Issue #{issue['number']}: {issue['title']}\n\n"
             f"Issue body:\n{issue_body}\n\n"
+            f"Human approval / feedback (verify every literal detail from this text):\n"
+            f"{approval_block}\n\n"
             f"Root cause:\n{investigation.root_cause}\n\n"
             f"Implementation summary:\n{implementation.summary}\n\n"
             f"Files changed:\n{files_block}\n\n"
@@ -303,6 +326,7 @@ class ReviewerAgent(BaseAgent):
             primary_repo=context["primary_repo"],
             local_repo_path=context["local_repo_path"],
             layers=context["layers"],
+            human_approval_text=context.get("human_approval_text"),
             live_verification_note=reason,
         )
         return self.run(fallback_message, ReviewResult)
@@ -529,24 +553,6 @@ class ReviewerAgent(BaseAgent):
             "stdout": completed.stdout[-8000:],
             "stderr": completed.stderr[-8000:],
         }
-
-    def _checkout_branch(self, local_repo_path: str, branch_name: str) -> None:
-        for args in (
-            ["git", "fetch", "origin", branch_name, "--depth", "1"],
-            ["git", "checkout", branch_name],
-        ):
-            completed = subprocess.run(
-                args,
-                cwd=local_repo_path,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if completed.returncode != 0:
-                raise AgentError(
-                    f"Could not checkout branch {branch_name!r} in {local_repo_path}: "
-                    f"{completed.stderr or completed.stdout}"
-                )
 
     def _safe_cleanup_live_verification(self) -> None:
         """Best-effort cleanup for processes, DB container, marker rows, and scripts."""

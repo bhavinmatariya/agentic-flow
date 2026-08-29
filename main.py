@@ -226,6 +226,11 @@ def _handle_issue_comment(
     reporter: RunReporter,
 ) -> int:
     """Parse a human reply and run the full pipeline when approved."""
+    if "agentic-flow:auto" in comment_body:
+        logger.info("Ignoring bot's own comment, exiting.")
+        reporter.record_outcome_noop("Ignoring bot's own comment")
+        return 0
+
     if not adapter.has_label(issue_number, AWAITING_APPROVAL_LABEL):
         reason = (
             f"Issue #{issue_number} does not have label {AWAITING_APPROVAL_LABEL!r}; "
@@ -303,6 +308,7 @@ def _handle_issue_comment(
             issue=issue,
             issue_number=issue_number,
             parsed=parsed,
+            comment_body=comment_body,
             agents=agents,
             reporter=reporter,
         )
@@ -315,6 +321,7 @@ def _handle_approval(
     issue: dict[str, Any],
     issue_number: int,
     parsed: ParsedIntent,
+    comment_body: str,
     agents: _PipelineAgents,
     reporter: RunReporter,
 ) -> int:
@@ -352,6 +359,7 @@ def _handle_approval(
         approach,
         settings.github_repo,
         issue_number,
+        human_approval_text=comment_body,
         reporter=reporter,
     )
 

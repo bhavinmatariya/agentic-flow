@@ -21,6 +21,7 @@ from pydantic import ValidationError
 
 from core.exceptions import ToolError
 from core.models import CodeMatch, RepoConfig
+from tools.environment_manager import authenticated_git_remote_url
 from utils.logger import get_logger
 
 _GREP_HIT_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -100,9 +101,7 @@ class CodeSearchTool:
             )
 
         dest.parent.mkdir(parents=True, exist_ok=True)
-        authenticated_url = (
-            f"https://x-access-token:{token}@github.com/{owner}/{name}.git"
-        )
+        authenticated_url = authenticated_git_remote_url(repo_full_name, token)
         public_url = f"https://github.com/{owner}/{name}.git"
         env = self._git_env()
 

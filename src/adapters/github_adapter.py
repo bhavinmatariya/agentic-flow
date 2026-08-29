@@ -155,10 +155,11 @@ class GitHubAdapter(IssueProviderAdapter):
 
     def post_comment(self, issue_number: int, body: str) -> dict[str, Any]:
         """Post a comment on a GitHub issue."""
+        marked_body = body.rstrip() + "\n\n<!-- agentic-flow:auto -->"
         issue = self._issue(issue_number)
         comment = self._wrap(
             f"post_comment({issue_number})",
-            lambda: issue.create_comment(body),
+            lambda: issue.create_comment(marked_body),
         )
         logger.info("Posted comment on issue #%s", issue_number)
         return self._comment_to_dict(comment)
