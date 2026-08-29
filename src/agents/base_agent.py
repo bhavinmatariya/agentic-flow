@@ -16,7 +16,7 @@ from utils.logger import get_logger
 
 TModel = TypeVar("TModel", bound=BaseModel)
 
-_MAX_TOOL_ROUNDS: int = 25
+_MAX_TURNS: int = 25
 
 
 class BaseAgent(ABC):
@@ -68,11 +68,17 @@ class BaseAgent(ABC):
             {"role": "user", "content": user_message},
         ]
 
-        for round_index in range(_MAX_TOOL_ROUNDS):
+        for turn in range(1, _MAX_TURNS + 1):
             response = self._create_message(messages)
             stop_reason = response.stop_reason
 
             if stop_reason == "tool_use":
+                self._logger.info(
+                    "Agent %s starting tool-use turn %d/%d",
+                    self._agent_type,
+                    turn,
+                    _MAX_TURNS,
+                )
                 messages.append(
                     {"role": "assistant", "content": self._assistant_content(response)}
                 )
@@ -83,7 +89,9 @@ class BaseAgent(ABC):
                     }
                 )
                 self._logger.debug(
-                    "Tool-use round %d complete; continuing", round_index + 1
+                    "Tool-use turn %d/%d complete; continuing",
+                    turn,
+                    _MAX_TURNS,
                 )
                 continue
 
@@ -96,8 +104,9 @@ class BaseAgent(ABC):
             return self._parse_output(final_text, output_model)
 
         raise AgentError(
-            f"Exceeded {_MAX_TOOL_ROUNDS} tool-use rounds without a final answer. "
-            "The model kept requesting tools instead of returning JSON."
+            f"Agent {self._agent_type!r} exceeded the maximum of {_MAX_TURNS} "
+            "tool-use turns without returning final JSON. The model may be "
+            "stuck in a tool loop; inspect recent tool errors and retry."
         )
 
     def _create_message(self, messages: list[dict[str, Any]]) -> Any:

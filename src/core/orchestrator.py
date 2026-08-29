@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,7 +17,7 @@ from core.models import (
     Investigation,
     ReviewResult,
 )
-from utils.logger import get_logger
+from utils.logger import RunReporter, get_logger
 
 IN_PROGRESS_LABEL = "agent:in-progress"
 NEEDS_HUMAN_LABEL = "agent:needs-human"
@@ -62,6 +63,8 @@ class ImplementationOrchestrator:
         approach: Approach,
         primary_repo: str,
         issue_number: int,
+        *,
+        reporter: RunReporter | None = None,
     ) -> OrchestratorResult:
         """Implement, review, and open a PR when review approves the change."""
         history: list[dict[str, Any]] = []
@@ -76,19 +79,26 @@ class ImplementationOrchestrator:
                 self._max_rounds,
                 issue_number,
             )
+            implement_pct = min(60 + (round_index - 1) * 8, 78)
+            review_pct = min(78 + (round_index - 1) * 8, 92)
+            implement_ctx = (
+                reporter.stage("IMPLEMENTING", implement_pct)
+                if reporter is not None
+                else nullcontext()
+            )
+            review_ctx = (
+                reporter.stage("REVIEWING", review_pct)
+                if reporter is not None
+                else nullcontext()
+            )
             try:
-                implementation = self._implementer.implement(
-                    issue,
-                    investigation,
-                    approach,
-                    primary_repo,
-                )
-                review = self._reviewer.review(
-                    issue,
-                    investigation,
-                    implementation,
-                    primary_repo,
-                )
+                with implement_ctx:
+                    implementation = self._implementer.implement(
+                        issue,
+                        investigation,
+                        approach,
+                        primary_repo,
+                    )
             except AgentError as exc:
                 history.append(
                     {
@@ -101,7 +111,38 @@ class ImplementationOrchestrator:
                     issue=issue,
                     approach=approach,
                     history=history,
-                    reason=f"Agent error in round {round_index}: {exc}",
+                    reason=f"Implementer error in round {round_index}: {exc}",
+                )
+                self._mark_needs_human(issue_number, diagnostic)
+                return OrchestratorResult(
+                    passed=False,
+                    review_result=last_review,
+                    implementation_result=last_implementation,
+                    diagnostic_comment=diagnostic,
+                    round_history=history,
+                )
+
+            try:
+                with review_ctx:
+                    review = self._reviewer.review(
+                        issue,
+                        investigation,
+                        implementation,
+                        primary_repo,
+                    )
+            except AgentError as exc:
+                history.append(
+                    {
+                        "round": round_index,
+                        "stage": "agent_error",
+                        "error": str(exc),
+                    }
+                )
+                diagnostic = self._build_diagnostic_comment(
+                    issue=issue,
+                    approach=approach,
+                    history=history,
+                    reason=f"Reviewer error in round {round_index}: {exc}",
                 )
                 self._mark_needs_human(issue_number, diagnostic)
                 return OrchestratorResult(

@@ -38,6 +38,7 @@ from tools.code_editor import CodeEditTool
 from tools.code_search import CodeSearchTool
 from tools.db_verifier import DBVerifierTool
 from tools.environment_manager import EnvironmentManager
+from utils.logger import RunReporter
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,7 @@ def _handle_issue_opened(
     issue_number: int,
     model: str,
     repos_json: Path,
+    reporter: RunReporter,
 ) -> int:
     """Investigate an issue, propose fixes, and post the proposal comment."""
     issue = adapter.get_issue(issue_number)
@@ -191,23 +193,25 @@ def _handle_issue_opened(
             tmp_dir=tmp,
             repos_json=repos_json,
         )
-        investigation = agents.investigator.investigate(
-            issue["title"],
-            issue["body"],
-            settings.github_repo,
-        )
-        proposal = agents.proposer.propose(investigation)
+        with reporter.stage("INVESTIGATING", 40):
+            investigation = agents.investigator.investigate(
+                issue["title"],
+                issue["body"],
+                settings.github_repo,
+            )
+        with reporter.stage("PROPOSING", 75):
+            proposal = agents.proposer.propose(investigation)
+            comment_body = agents.proposer.format_as_comment(proposal, investigation)
+            comment = adapter.post_comment(issue_number, comment_body)
+            adapter.add_label(issue_number, AWAITING_APPROVAL_LABEL)
+            logger.info(
+                "Posted proposal on issue #%s (comment id=%s, approaches=%d)",
+                issue_number,
+                comment["id"],
+                len(proposal.approaches),
+            )
 
-    comment_body = agents.proposer.format_as_comment(proposal, investigation)
-    comment = adapter.post_comment(issue_number, comment_body)
-    adapter.add_label(issue_number, AWAITING_APPROVAL_LABEL)
-
-    logger.info(
-        "Posted proposal on issue #%s (comment id=%s, approaches=%d)",
-        issue_number,
-        comment["id"],
-        len(proposal.approaches),
-    )
+    reporter.record_outcome_proposal_posted(approaches=len(proposal.approaches))
     return 0
 
 
@@ -219,14 +223,16 @@ def _handle_issue_comment(
     comment_body: str,
     comment_author: str,
     repos_json: Path,
+    reporter: RunReporter,
 ) -> int:
     """Parse a human reply and run the full pipeline when approved."""
     if not adapter.has_label(issue_number, AWAITING_APPROVAL_LABEL):
-        logger.info(
-            "Issue #%s does not have label %r; nothing to do",
-            issue_number,
-            AWAITING_APPROVAL_LABEL,
+        reason = (
+            f"Issue #{issue_number} does not have label {AWAITING_APPROVAL_LABEL!r}; "
+            "nothing to do"
         )
+        logger.info(reason)
+        reporter.record_outcome_noop(reason)
         return 0
 
     issue = adapter.get_issue(issue_number)
@@ -252,39 +258,42 @@ def _handle_issue_comment(
             tmp_dir=tmp,
             repos_json=repos_json,
         )
-        parser = ResponseParserAgent(agents.client, model, settings)
-        parsed = parser.parse(
-            issue["title"],
-            issue["body"],
-            str(proposal_comment["body"]),
-            comment_body,
-        )
-
-        logger.info(
-            "Parsed human reply on issue #%s as intent=%r",
-            issue_number,
-            parsed.intent,
-        )
+        with reporter.stage("PARSING", 15):
+            parser = ResponseParserAgent(agents.client, model, settings)
+            parsed = parser.parse(
+                issue["title"],
+                issue["body"],
+                str(proposal_comment["body"]),
+                comment_body,
+            )
+            logger.info(
+                "Parsed human reply on issue #%s as intent=%r",
+                issue_number,
+                parsed.intent,
+            )
 
         if parsed.intent == "unrelated":
-            logger.info(
-                "Human reply on issue #%s classified as unrelated; no action taken",
-                issue_number,
-            )
+            reason = f"Human reply on issue #{issue_number} classified as unrelated"
+            logger.info("%s; no action taken", reason)
+            reporter.record_outcome_noop(reason)
             return 0
 
         if parsed.intent == "revise":
-            adapter.post_comment(
-                issue_number,
-                (
-                    "Thanks — we received your feedback and will use it when "
-                    "preparing a revised proposal.\n\n"
-                    f"> {parsed.feedback}"
-                ),
-            )
-            logger.info(
-                "Recorded revision feedback on issue #%s; label unchanged",
-                issue_number,
+            with reporter.stage("PROPOSING", 50):
+                adapter.post_comment(
+                    issue_number,
+                    (
+                        "Thanks — we received your feedback and will use it when "
+                        "preparing a revised proposal.\n\n"
+                        f"> {parsed.feedback}"
+                    ),
+                )
+                logger.info(
+                    "Recorded revision feedback on issue #%s; label unchanged",
+                    issue_number,
+                )
+            reporter.record_outcome_noop(
+                f"Revision feedback recorded on issue #{issue_number}"
             )
             return 0
 
@@ -295,6 +304,7 @@ def _handle_issue_comment(
             issue_number=issue_number,
             parsed=parsed,
             agents=agents,
+            reporter=reporter,
         )
 
 
@@ -306,6 +316,7 @@ def _handle_approval(
     issue_number: int,
     parsed: ParsedIntent,
     agents: _PipelineAgents,
+    reporter: RunReporter,
 ) -> int:
     """Run implement → review → PR after a human approves an approach."""
     adapter.remove_label(issue_number, AWAITING_APPROVAL_LABEL)
@@ -320,19 +331,20 @@ def _handle_approval(
         ),
     )
 
-    investigation = agents.investigator.investigate(
-        issue["title"],
-        issue["body"],
-        settings.github_repo,
-    )
-    proposal = agents.proposer.propose(investigation)
-    approach = resolve_approach(proposal.approaches, parsed.selected_approach)
-
-    logger.info(
-        "Running orchestrator for issue #%s with approach %r",
-        issue_number,
-        approach.name,
-    )
+    with reporter.stage("INVESTIGATING", 25):
+        investigation = agents.investigator.investigate(
+            issue["title"],
+            issue["body"],
+            settings.github_repo,
+        )
+    with reporter.stage("PROPOSING", 40):
+        proposal = agents.proposer.propose(investigation)
+        approach = resolve_approach(proposal.approaches, parsed.selected_approach)
+        logger.info(
+            "Running orchestrator for issue #%s with approach %r",
+            issue_number,
+            approach.name,
+        )
 
     result = agents.orchestrator.run(
         issue,
@@ -340,6 +352,7 @@ def _handle_approval(
         approach,
         settings.github_repo,
         issue_number,
+        reporter=reporter,
     )
 
     if result.passed and result.pr_url:
@@ -350,9 +363,27 @@ def _handle_approval(
             issue_number,
             f"Pull request opened for the approved fix:\n\n{result.pr_url}",
         )
-        logger.info("Pipeline succeeded for issue #%s: %s", issue_number, result.pr_url)
+        files = (
+            list(result.implementation_result.files_changed)
+            if result.implementation_result
+            else []
+        )
+        reporter.record_outcome_pr_opened(
+            result.pr_url,
+            round_count=len(result.round_history),
+            files=files,
+        )
         return 0
 
+    files = (
+        list(result.implementation_result.files_changed)
+        if result.implementation_result
+        else []
+    )
+    reporter.record_outcome_needs_human(
+        round_count=len(result.round_history),
+        files=files,
+    )
     logger.warning(
         "Pipeline stalled for issue #%s; diagnostic already posted by orchestrator",
         issue_number,
@@ -404,48 +435,62 @@ def main(argv: list[str] | None = None) -> int:
     """Run the full agentic-flow pipeline for the requested GitHub event."""
     args = _parse_args(argv)
     issue_number = args.issue_number
+    reporter = RunReporter(issue_number=issue_number, event=args.event)
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
+    reporter.print_startup_banner()
 
     adapter: GitHubAdapter | None = None
+    exit_code = 1
 
     try:
         settings = Settings.from_env()
+        reporter.repo = settings.github_repo
         adapter = GitHubAdapter(settings)
         model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)
         repos_json = Path(__file__).resolve().parent / "repos.json"
 
         if args.event == "issue_opened":
-            return _handle_issue_opened(
+            exit_code = _handle_issue_opened(
                 adapter,
                 settings,
                 issue_number,
                 model,
                 repos_json,
+                reporter,
+            )
+        else:
+            exit_code = _handle_issue_comment(
+                adapter,
+                settings,
+                issue_number,
+                model,
+                str(args.comment_body),
+                str(args.comment_author).strip(),
+                repos_json,
+                reporter,
             )
 
-        return _handle_issue_comment(
-            adapter,
-            settings,
-            issue_number,
-            model,
-            str(args.comment_body),
-            str(args.comment_author).strip(),
-            repos_json,
-        )
-
     except ConfigurationError as exc:
-        logger.error("Configuration error: %s", exc)
-        return 1
+        error_text = f"Configuration error: {exc}"
+        logger.error(error_text)
+        reporter.record_outcome_error(error_text)
+        exit_code = 1
     except (AdapterError, AgentError) as exc:
         _post_agent_error(adapter, issue_number, exc)
-        return 1
+        reporter.record_outcome_error(_error_summary(exc))
+        exit_code = 1
     except Exception as exc:
         _post_agent_error(adapter, issue_number, exc)
-        return 1
+        reporter.record_outcome_error(_error_summary(exc))
+        exit_code = 1
+    finally:
+        reporter.write_step_summary(exit_code)
+
+    return exit_code
 
 
 if __name__ == "__main__":

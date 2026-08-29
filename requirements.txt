@@ -2,6 +2,7 @@ anthropic
 PyGithub
 pydantic
 python-dotenv
+pyfiglet
 
 # Optional: full-stack live verification (Step 8 extension)
 playwright

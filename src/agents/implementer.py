@@ -310,7 +310,10 @@ class ImplementerAgent(BaseAgent):
                 )
                 return json.dumps({"status": "committed"}, ensure_ascii=False)
         except ToolError as exc:
-            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+            return json.dumps(
+                {"error": f"{type(exc).__name__}: {exc}"},
+                ensure_ascii=False,
+            )
 
         return json.dumps(
             {"error": f"Unknown tool: {tool_name!r}"},

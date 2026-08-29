@@ -32,11 +32,12 @@ class GitHubAdapter(IssueProviderAdapter):
 
     def _format_github_error(self, action: str, exc: GithubException | UnknownObjectException) -> str:
         """Build a human-readable error message with actionable hints."""
-        detail = exc.data.get("message", str(exc)) if getattr(exc, "data", None) else str(exc)
-        message = (
-            f"GitHub API error during {action} on {self._settings.github_repo}: {detail}"
-        )
+        detail = self._github_exception_detail(exc)
         status = getattr(exc, "status", None)
+        message = f"GitHub API error during {action} on {self._settings.github_repo}"
+        if status is not None:
+            message += f" (HTTP {status})"
+        message += f": {detail}"
         if status == 404:
             message += (
                 " Verify GITHUB_REPO is 'owner/repository' (case-sensitive name), "
@@ -51,6 +52,52 @@ class GitHubAdapter(IssueProviderAdapter):
                 "repositories, public_repo for public ones)."
             )
         return message
+
+    @staticmethod
+    def _github_exception_detail(exc: GithubException | UnknownObjectException) -> str:
+        """Extract a safe human-readable message from a PyGithub exception."""
+        data = getattr(exc, "data", None)
+        if isinstance(data, dict):
+            api_message = data.get("message")
+            if api_message:
+                return str(api_message)
+        return str(exc)
+
+    @staticmethod
+    def _extract_commit_metadata(
+        result: Any,
+        *,
+        file_path: str,
+        branch_name: str,
+    ) -> dict[str, Any]:
+        """Return commit metadata from a PyGithub create/update_file response."""
+        commit = result.get("commit") if isinstance(result, dict) else getattr(result, "commit", None)
+        if commit is None:
+            raise AdapterError(
+                f"GitHub commit_file response for {file_path!r} on branch "
+                f"{branch_name!r} did not include a commit object"
+            )
+
+        sha = getattr(commit, "sha", None)
+        if not sha:
+            raise AdapterError(
+                f"GitHub commit_file response for {file_path!r} on branch "
+                f"{branch_name!r} did not include a commit SHA"
+            )
+
+        url = getattr(commit, "html_url", None) or ""
+        commit_message = ""
+        nested_commit = getattr(commit, "commit", None)
+        if nested_commit is not None:
+            nested_message = getattr(nested_commit, "message", None)
+            if nested_message:
+                commit_message = str(nested_message)
+
+        return {
+            "sha": sha,
+            "url": url,
+            "message": commit_message,
+        }
 
     def _wrap(self, action: str, fn: Any) -> Any:
         """Execute ``fn`` and translate GitHub API failures into ``AdapterError``."""
@@ -194,39 +241,46 @@ class GitHubAdapter(IssueProviderAdapter):
         message: str,
     ) -> dict[str, Any]:
         """Create or update a file on the given branch."""
+        normalized_path = file_path.replace("\\", "/").lstrip("/")
+        if not normalized_path:
+            raise AdapterError("file_path must be a non-empty repository-relative path")
+
         def _commit() -> dict[str, Any]:
             try:
-                existing = self._repo.get_contents(file_path, ref=branch_name)
+                existing = self._repo.get_contents(normalized_path, ref=branch_name)
+                if isinstance(existing, list):
+                    raise AdapterError(
+                        f"Path {normalized_path!r} is a directory, not a file, "
+                        f"on branch {branch_name!r}"
+                    )
                 result = self._repo.update_file(
-                    path=file_path,
+                    path=normalized_path,
                     message=message,
                     content=content,
                     sha=existing.sha,
                     branch=branch_name,
                 )
-                commit = result["commit"]
             except UnknownObjectException:
                 result = self._repo.create_file(
-                    path=file_path,
+                    path=normalized_path,
                     message=message,
                     content=content,
                     branch=branch_name,
                 )
-                commit = result["commit"]
 
-            return {
-                "sha": commit.sha,
-                "url": commit.html_url,
-                "message": commit.commit.message,
-            }
+            return self._extract_commit_metadata(
+                result,
+                file_path=normalized_path,
+                branch_name=branch_name,
+            )
 
         metadata = self._wrap(
-            f"commit_file({file_path!r}, branch={branch_name!r})",
+            f"commit_file({normalized_path!r}, branch={branch_name!r})",
             _commit,
         )
         logger.info(
             "Committed %r on branch %r (sha=%s)",
-            file_path,
+            normalized_path,
             branch_name,
             metadata["sha"],
         )

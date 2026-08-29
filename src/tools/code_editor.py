@@ -60,7 +60,11 @@ class CodeEditTool:
         except AdapterError as exc:
             if not _is_existing_branch_error(exc):
                 raise ToolError(
-                    f"Could not create branch {branch_name!r}: {exc}"
+                    _format_tool_error(
+                        "create_branch",
+                        exc,
+                        context=f"branch={branch_name!r}",
+                    )
                 ) from exc
             self._logger.info("Branch %r already exists; reusing it", branch_name)
         return branch_name
@@ -99,39 +103,102 @@ class CodeEditTool:
             content = self._adapter.get_file_content(repo, normalized_path, branch)
         except AdapterError as exc:
             raise ToolError(
-                f"Could not read {repo}:{normalized_path}@{branch}: {exc}"
+                _format_tool_error(
+                    "get_file_content",
+                    exc,
+                    context=f"{repo}:{normalized_path}@{branch}",
+                )
             ) from exc
 
-        match_count = content.count(old_string)
-        if match_count == 0:
-            raise ToolError(
-                f"old_string was not found in {normalized_path!r}. Read the "
-                "current file content and provide an exact substring to replace."
-            )
-        if match_count > 1:
-            raise ToolError(
-                f"old_string matched {match_count} times in {normalized_path!r}. "
-                "Provide more surrounding context so the match is unique."
-            )
-
-        updated_content = content.replace(old_string, new_string, 1)
-        try:
-            self._adapter.commit_file(
-                branch,
-                normalized_path,
-                updated_content,
-                commit_message,
-            )
-        except AdapterError as exc:
-            raise ToolError(
-                f"Could not commit {normalized_path!r} on branch {branch!r}: {exc}"
-            ) from exc
+        updated_content = _apply_exact_replace(
+            content,
+            old_string=old_string,
+            new_string=new_string,
+            path=normalized_path,
+        )
+        self._commit_with_conflict_retry(
+            repo=repo,
+            branch=branch,
+            path=normalized_path,
+            content=updated_content,
+            commit_message=commit_message,
+            old_string=old_string,
+            new_string=new_string,
+        )
 
         self._logger.info(
             "Committed surgical edit to %r on branch %r",
             normalized_path,
             branch,
         )
+
+    def _commit_with_conflict_retry(
+        self,
+        *,
+        repo: str,
+        branch: str,
+        path: str,
+        content: str,
+        commit_message: str,
+        old_string: str,
+        new_string: str,
+    ) -> None:
+        """Commit once, re-fetch and retry on SHA/conflict errors."""
+        try:
+            self._adapter.commit_file(branch, path, content, commit_message)
+            return
+        except AdapterError as first_exc:
+            if not _is_sha_conflict_error(first_exc):
+                raise ToolError(
+                    _format_tool_error(
+                        "commit_file",
+                        first_exc,
+                        context=f"{path!r} on branch {branch!r}",
+                    )
+                ) from first_exc
+
+        self._logger.warning(
+            "Commit conflict on %r@%r; re-fetching file and retrying once: %s",
+            path,
+            branch,
+            first_exc,
+        )
+
+        try:
+            fresh_content = self._adapter.get_file_content(repo, path, branch)
+        except AdapterError as read_exc:
+            raise ToolError(
+                "Commit failed with a SHA/conflict error and the automatic "
+                f"re-fetch failed for {repo}:{path}@{branch}: "
+                f"{_format_tool_error('get_file_content', read_exc)} "
+                f"(original commit error: "
+                f"{_format_tool_error('commit_file', first_exc)})"
+            ) from read_exc
+
+        try:
+            retried_content = _apply_exact_replace(
+                fresh_content,
+                old_string=old_string,
+                new_string=new_string,
+                path=path,
+            )
+        except ToolError as replace_exc:
+            raise ToolError(
+                "Commit failed with a SHA/conflict error on "
+                f"{path!r}; after re-fetch, the edit could not be reapplied: "
+                f"{replace_exc} (original commit error: "
+                f"{_format_tool_error('commit_file', first_exc)})"
+            ) from replace_exc
+
+        try:
+            self._adapter.commit_file(branch, path, retried_content, commit_message)
+        except AdapterError as retry_exc:
+            raise ToolError(
+                "Commit retry failed after re-fetching fresh content for "
+                f"{path!r} on branch {branch!r}: "
+                f"{_format_tool_error('commit_file', retry_exc)} "
+                f"(original conflict: {_format_tool_error('commit_file', first_exc)})"
+            ) from retry_exc
 
     def _ensure_commit_target(self, repo: str) -> None:
         """Reject commits when the adapter is bound to a different repository."""
@@ -143,7 +210,54 @@ class CodeEditTool:
             )
 
 
+def _apply_exact_replace(
+    content: str,
+    *,
+    old_string: str,
+    new_string: str,
+    path: str,
+) -> str:
+    """Replace exactly one ``old_string`` occurrence in ``content``."""
+    match_count = content.count(old_string)
+    if match_count == 0:
+        raise ToolError(
+            f"old_string was not found in {path!r}. Read the current file "
+            "content and provide an exact substring to replace."
+        )
+    if match_count > 1:
+        raise ToolError(
+            f"old_string matched {match_count} times in {path!r}. Provide more "
+            "surrounding context so the match is unique."
+        )
+    return content.replace(old_string, new_string, 1)
+
+
+def _format_tool_error(
+    operation: str,
+    exc: Exception,
+    *,
+    context: str | None = None,
+) -> str:
+    """Format an exception for tool_result payloads."""
+    prefix = f"{operation} failed"
+    if context:
+        prefix += f" for {context}"
+    return f"{prefix}: {type(exc).__name__}: {exc}"
+
+
 def _is_existing_branch_error(exc: AdapterError) -> bool:
     """Return True when ``exc`` indicates the branch ref already exists."""
     message = str(exc).lower()
     return "already exists" in message or "reference already exists" in message
+
+
+def _is_sha_conflict_error(exc: AdapterError) -> bool:
+    """Return True when ``exc`` looks like a stale-SHA or merge conflict."""
+    message = str(exc).lower()
+    return (
+        "http 409" in message
+        or "status 409" in message
+        or "sha" in message
+        or "conflict" in message
+        or "does not match" in message
+    )
