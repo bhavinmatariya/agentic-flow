@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import logging
 
+from typing import Final
+
 from adapters.base import AdapterError, IssueProviderAdapter
 from core.exceptions import ToolError
 from utils.logger import get_logger
+
+
+_NEW_FILE_OLD_STRING: Final[str] = "__NEW_FILE__"
 
 
 class CodeEditTool:
@@ -78,14 +83,18 @@ class CodeEditTool:
         new_string: str,
         commit_message: str,
     ) -> None:
-        """Replace exactly one ``old_string`` occurrence and commit the file.
+        """Replace exactly one ``old_string`` occurrence, or create a new file.
+
+        Pass ``old_string`` as an empty string to create a brand-new file whose
+        full content is ``new_string``. For edits to existing files,
+        ``old_string`` must occur exactly once in the live file on GitHub.
 
         Args:
             repo: GitHub slug containing the file.
             branch: Branch to read from and commit onto.
             path: Repository-relative file path.
-            old_string: Exact text to find; must occur exactly once.
-            new_string: Replacement text for that single occurrence.
+            old_string: Exact text to find, or ``""`` to create a new file.
+            new_string: Replacement text, or full file content when creating.
             commit_message: Git commit message for the change.
 
         Raises:
@@ -96,8 +105,31 @@ class CodeEditTool:
         normalized_path = path.replace("\\", "/").lstrip("/")
         if not normalized_path:
             raise ToolError("path must be a non-empty repository-relative file path")
-        if not old_string:
-            raise ToolError("old_string must not be empty")
+
+        if _is_new_file_edit(old_string):
+            try:
+                self._adapter.commit_file(
+                    branch,
+                    normalized_path,
+                    new_string,
+                    commit_message,
+                )
+            except AdapterError as exc:
+                raise ToolError(
+                    _format_tool_error(
+                        "commit_file",
+                        exc,
+                        context=(
+                            f"create {repo}:{normalized_path}@{branch}"
+                        ),
+                    )
+                ) from exc
+            self._logger.info(
+                "Committed new file %r on branch %r",
+                normalized_path,
+                branch,
+            )
+            return
 
         try:
             content = self._adapter.get_file_content(repo, normalized_path, branch)
@@ -208,6 +240,11 @@ class CodeEditTool:
             raise ToolError(
                 f"Cannot commit to {repo!r}; adapter is bound to {configured_repo!r}"
             )
+
+
+def _is_new_file_edit(old_string: str) -> bool:
+    """Return True when ``edit_file`` should create a file instead of patching."""
+    return old_string == "" or old_string == _NEW_FILE_OLD_STRING
 
 
 def _apply_exact_replace(

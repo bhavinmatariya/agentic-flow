@@ -30,7 +30,10 @@ IMPLEMENTER_SYSTEM_PROMPT: Final[str] = (
     "changed since then.\n"
     "4. Make each distinct change as its own precise edit_file call with "
     "a unique old_string, rather than one large replacement.\n"
-    "5. If something described in the approach no longer matches the "
+    "5. To create a brand-new file, call edit_file with old_string set to "
+    "the empty string \"\" and new_string set to the full file content. "
+    "Do not use any other sentinel for new files.\n"
+    "6. If something described in the approach no longer matches the "
     "current code, stop and explain what's different rather than "
     "guessing.\n\n"
     "When finished, respond with ONLY JSON: {\"branch_name\": str, "
@@ -95,9 +98,12 @@ IMPLEMENTER_TOOL_DEFINITIONS: Final[list[dict[str, Any]]] = [
     {
         "name": "edit_file",
         "description": (
-            "Surgically replace exactly one occurrence of old_string in a file "
-            "on the working branch. old_string must appear exactly once in the "
-            "current live file content on GitHub. Never rewrite a whole file."
+            "Surgically replace exactly one occurrence of old_string in an "
+            "existing file on the working branch, or create a brand-new file. "
+            "For existing files, old_string must appear exactly once in the "
+            "current live file content on GitHub. To create a new file, set "
+            "old_string to the empty string \"\" and put the full file content "
+            "in new_string. Never rewrite a whole existing file in one call."
         ),
         "input_schema": {
             "type": "object",
@@ -119,8 +125,10 @@ IMPLEMENTER_TOOL_DEFINITIONS: Final[list[dict[str, Any]]] = [
                 "old_string": {
                     "type": "string",
                     "description": (
-                        "Exact substring to replace. Must match exactly once "
-                        "in the current file."
+                        "Exact substring to replace in an existing file. Must "
+                        "match exactly once in the current file. Use the empty "
+                        "string \"\" to create a brand-new file; then "
+                        "new_string must contain the full file content."
                     ),
                 },
                 "new_string": {
@@ -285,7 +293,8 @@ class ImplementerAgent(BaseAgent):
             f"- Estimated scope: {approach.estimated_scope}\n\n"
             "Use read_file and search_code against the local checkout to inspect "
             "code. Use edit_file with repo, branch, path, and exact old_string "
-            "values to commit surgical changes on GitHub.\n\n"
+            "values to commit surgical changes on GitHub. To create a new file, "
+            "pass old_string as \"\" and new_string as the full file content.\n\n"
             f"Set branch_name to {branch_name!r} in your final JSON. "
             "Respond with only the JSON object specified in your instructions."
         )
@@ -332,10 +341,12 @@ class ImplementerAgent(BaseAgent):
 
 
 def _require_str(tool_input: dict[str, Any], key: str) -> str:
-    """Return a non-empty string argument from a tool-input dict."""
+    """Return a required string argument from a tool-input dict."""
     value = tool_input.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise ToolError(f"Tool argument {key!r} must be a non-empty string")
+    if not isinstance(value, str):
+        raise ToolError(f"Tool argument {key!r} must be a string")
     if key == "old_string":
         return value
+    if not value.strip():
+        raise ToolError(f"Tool argument {key!r} must be a non-empty string")
     return value.strip()

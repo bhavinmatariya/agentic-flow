@@ -889,12 +889,44 @@ def checkout_git_branch(
         ["git", "remote", "set-url", "origin", remote_url],
         f"git remote set-url origin for {repo_full_name}",
     )
-    run_git(
-        ["git", "fetch", "origin", branch_name, "--depth", "1"],
-        f"git fetch origin {branch_name}",
+
+    ref_check = subprocess.run(
+        ["git", "rev-parse", "--verify", branch_name],
+        cwd=str(repo_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
     )
-    run_git(
-        ["git", "checkout", branch_name],
-        f"git checkout {branch_name}",
-    )
+    if ref_check.returncode != 0:
+        try:
+            run_git(
+                [
+                    "git",
+                    "fetch",
+                    "--depth",
+                    "1",
+                    "origin",
+                    f"{branch_name}:{branch_name}",
+                ],
+                f"git fetch origin {branch_name}:{branch_name}",
+            )
+        except EnvironmentSetupError as exc:
+            raise EnvironmentSetupError(
+                f"Could not fetch branch {branch_name!r} for local clone "
+                f"{local_repo_path!r}: {exc}"
+            ) from exc
+
+    try:
+        run_git(
+            ["git", "checkout", branch_name],
+            f"git checkout {branch_name}",
+        )
+    except EnvironmentSetupError as exc:
+        raise EnvironmentSetupError(
+            f"Could not check out branch {branch_name!r} in local clone "
+            f"{local_repo_path!r}: {exc}"
+        ) from exc
+
     log.info("Checked out branch %r in %s", branch_name, local_repo_path)
