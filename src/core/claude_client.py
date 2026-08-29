@@ -47,7 +47,8 @@ def call_claude(
         messages: Conversation messages for the API.
         tools: Tool definitions; may be empty.
         effort: Effort level passed via ``output_config``.
-        temperature: Sampling temperature.
+        temperature: Configured sampling temperature (logged only; omitted from
+            the API request because effort-based Claude models reject it).
         max_tokens: Maximum output tokens.
         agent_name: Logical agent name used in logs (for example ``investigator``).
         logger: Optional logger; defaults to the shared module logger.
@@ -66,13 +67,14 @@ def call_claude(
             request_kwargs: dict[str, Any] = {
                 "model": model,
                 "max_tokens": max_tokens,
-                "temperature": temperature,
                 "system": system_prompt,
                 "messages": messages,
                 "output_config": {"effort": effort},
             }
             if tools:
                 request_kwargs["tools"] = tools
+            # Claude 4.6+ / Sonnet 5 / Opus 5 reject temperature, top_p, and top_k
+            # when using output_config.effort. Keep temperature in logs/config only.
 
             response = client.messages.create(**request_kwargs)
             _log_claude_call(
@@ -145,8 +147,9 @@ def _log_claude_call(
     cost_text = f"${cost_usd:.6f}" if cost_usd is not None else "n/a"
 
     logger.info(
-        "Claude call agent=%s model=%s effort=%s temperature=%s max_tokens=%d "
-        "attempt=%d input_tokens=%s output_tokens=%s estimated_cost=%s",
+        "Claude call agent=%s model=%s effort=%s configured_temperature=%s "
+        "(omitted from API) max_tokens=%d attempt=%d input_tokens=%s "
+        "output_tokens=%s estimated_cost=%s",
         agent_name,
         model,
         effort,
