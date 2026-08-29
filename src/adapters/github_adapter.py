@@ -7,8 +7,8 @@ from typing import Any
 
 from github import Auth, Github, GithubException, UnknownObjectException
 
-from agentic_flow.adapters.base import AdapterError, IssueProviderAdapter
-from agentic_flow.config import Settings
+from adapters.base import AdapterError, IssueProviderAdapter
+from config import Settings
 
 logger = logging.getLogger(__name__)
 

@@ -2,6 +2,10 @@
 .env
 .env.local
 .env.*.local
+repos.json
+
+# Local repository checkouts
+.repos/
 
 # Python
 __pycache__/

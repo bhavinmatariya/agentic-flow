@@ -17,9 +17,9 @@ from pathlib import Path
 # Allow running without installing the package.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from agentic_flow.adapters.base import AdapterError
-from agentic_flow.adapters.github_adapter import GitHubAdapter
-from agentic_flow.config import ConfigurationError, Settings
+from adapters.base import AdapterError
+from adapters.github_adapter import GitHubAdapter
+from config import ConfigurationError, Settings
 
 DEFAULT_TEST_LABEL = "agentic-flow-test"
 
