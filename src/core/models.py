@@ -133,3 +133,45 @@ class Investigation(BaseModel):
     relevant_files: list[RelevantFile] = Field(default_factory=list)
     confidence: Literal["high", "medium", "low"]
     open_questions: list[str] = Field(default_factory=list)
+
+
+class Approach(BaseModel):
+    """One viable fix or mitigation path proposed for an issue.
+
+    ``nature`` is free text (for example ``temporary mitigation`` or
+    ``permanent fix``). It is not an enum; the model chooses wording per issue.
+
+    Attributes:
+        name: Short title for this approach.
+        nature: The model's own label for what kind of solution this is.
+        description: What the approach does in plain language.
+        why_it_works: How it addresses the root cause or mitigates symptoms.
+        risk: Risk level and what could go wrong.
+        tradeoffs: Speed, durability, scope, and other trade-offs.
+        estimated_scope: Rough effort or touch-area estimate in free text.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(..., min_length=1)
+    nature: str = Field(..., min_length=1)
+    description: str = Field(..., min_length=1)
+    why_it_works: str = Field(..., min_length=1)
+    risk: str = Field(..., min_length=1)
+    tradeoffs: str = Field(..., min_length=1)
+    estimated_scope: str = Field(..., min_length=1)
+
+
+class Proposal(BaseModel):
+    """Variable-length set of approaches produced by the proposer agent.
+
+    The proposer decides how many distinct, viable approaches exist for the
+    issue. There is no fixed count enforced beyond requiring at least one.
+
+    Attributes:
+        approaches: One or more proposed ways to address the investigation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    approaches: list[Approach] = Field(..., min_length=1)

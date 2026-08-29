@@ -2,5 +2,6 @@
 
 from agents.base_agent import BaseAgent
 from agents.investigator import InvestigatorAgent
+from agents.proposer import ProposerAgent
 
-__all__ = ["BaseAgent", "InvestigatorAgent"]
+__all__ = ["BaseAgent", "InvestigatorAgent", "ProposerAgent"]

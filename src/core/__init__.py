@@ -2,9 +2,11 @@
 
 from core.exceptions import AdapterError, AgentError, ToolError
 from core.models import (
+    Approach,
     CodeMatch,
     Investigation,
     LinkedRepo,
+    Proposal,
     RelevantFile,
     RepoConfig,
 )
@@ -12,9 +14,11 @@ from core.models import (
 __all__ = [
     "AdapterError",
     "AgentError",
+    "Approach",
     "CodeMatch",
     "Investigation",
     "LinkedRepo",
+    "Proposal",
     "RelevantFile",
     "RepoConfig",
     "ToolError",

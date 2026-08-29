@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Manual smoke test for Step 4: investigator agent.
+"""Manual smoke test for Step 5: investigator + proposer agents.
 
 Usage:
-    python test_step4.py <issue_number>
+    python test_step5.py <issue_number>
 
 Requires a populated .env file (see .env.example). Clones into a temporary
-directory that is deleted on exit. Optional linked repos are read from
-``repos.json`` when that file exists.
+directory for the investigator, then runs the proposer on the investigation.
+The formatted comment is printed only — nothing is posted to GitHub.
 """
 
 from __future__ import annotations
@@ -26,9 +26,10 @@ from anthropic import Anthropic
 from adapters.base import AdapterError
 from adapters.github_adapter import GitHubAdapter
 from agents.investigator import InvestigatorAgent
+from agents.proposer import ProposerAgent
 from config import ConfigurationError, Settings
 from core.exceptions import AgentError
-from core.models import Investigation
+from core.models import Investigation, Proposal
 from tools.code_search import CodeSearchTool
 
 DEFAULT_MODEL = "claude-sonnet-5"
@@ -36,6 +37,8 @@ DEFAULT_MODEL = "claude-sonnet-5"
 
 def _print_investigation(result: Investigation) -> None:
     """Pretty-print every Investigation field to stdout."""
+    print("=== Investigation ===")
+    print()
     print("issue_nature:")
     print(f"  {result.issue_nature}")
     print()
@@ -65,16 +68,34 @@ def _print_investigation(result: Investigation) -> None:
             print(f"  - {question}")
     else:
         print("  (none)")
+    print()
+
+
+def _print_proposal(result: Proposal) -> None:
+    """Pretty-print every Approach in a Proposal to stdout."""
+    print("=== Proposal (raw) ===")
+    print()
+    print(f"approach_count: {len(result.approaches)}")
+    print()
+    for index, approach in enumerate(result.approaches, start=1):
+        print(f"--- Approach {index}: {approach.name} ---")
+        print(f"nature: {approach.nature}")
+        print(f"description: {approach.description}")
+        print(f"why_it_works: {approach.why_it_works}")
+        print(f"risk: {approach.risk}")
+        print(f"tradeoffs: {approach.tradeoffs}")
+        print(f"estimated_scope: {approach.estimated_scope}")
+        print()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run InvestigatorAgent against a real GitHub issue."
+        description="Run InvestigatorAgent then ProposerAgent on a real issue."
     )
     parser.add_argument(
         "issue_number",
         type=int,
-        help="GitHub issue number to investigate",
+        help="GitHub issue number to investigate and propose fixes for",
     )
     parser.add_argument(
         "--model",
@@ -110,29 +131,44 @@ def main() -> int:
     print(f"Issue #{issue['number']}: {issue['title']}")
     print()
 
-    with tempfile.TemporaryDirectory(prefix="agentic-flow-step4-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="agentic-flow-step5-") as tmp:
         tool = CodeSearchTool(tmp)
         client = Anthropic(api_key=settings.anthropic_api_key)
-        agent = InvestigatorAgent(
+        investigator = InvestigatorAgent(
             client,
             args.model,
             tool,
             settings.github_token,
             linked_config_path=str(repos_json),
         )
+        proposer = ProposerAgent(client, args.model)
+
         try:
-            result = agent.investigate(
+            investigation = investigator.investigate(
                 issue["title"],
                 issue["body"],
                 settings.github_repo,
             )
         except AgentError as exc:
-            print(f"Agent error: {exc}", file=sys.stderr)
+            print(f"Investigator error: {exc}", file=sys.stderr)
             return 1
 
-    _print_investigation(result)
+        _print_investigation(investigation)
+
+        try:
+            proposal = proposer.propose(investigation)
+        except AgentError as exc:
+            print(f"Proposer error: {exc}", file=sys.stderr)
+            return 1
+
+    _print_proposal(proposal)
+
+    comment = proposer.format_as_comment(proposal)
+    print("=== Formatted GitHub comment (not posted) ===")
     print()
-    print("Step 4 smoke test passed.")
+    print(comment)
+    print()
+    print("Step 5 smoke test passed.")
     return 0
 
 
