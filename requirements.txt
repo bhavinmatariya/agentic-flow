@@ -1,0 +1,4 @@
+anthropic
+PyGithub
+pydantic
+python-dotenv

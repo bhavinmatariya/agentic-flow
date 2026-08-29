@@ -1,0 +1,33 @@
+name: Agentic Flow
+description: Acknowledge a GitHub issue by posting an agent comment.
+
+inputs:
+  anthropic-api-key:
+    description: Anthropic API key for downstream agent steps.
+    required: true
+  github-token:
+    description: GitHub token with repo access for the target repository.
+    required: true
+  issue-number:
+    description: Issue number to acknowledge.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      shell: bash
+      run: pip install -r "${{ github.action_path }}/requirements.txt"
+
+    - name: Acknowledge issue
+      shell: bash
+      run: python "${{ github.action_path }}/main.py" --issue-number "${{ inputs.issue-number }}"
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITHUB_REPO: ${{ github.repository }}
