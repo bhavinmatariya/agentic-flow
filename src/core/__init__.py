@@ -1,7 +1,12 @@
-"""Core types shared across agentic-flow components."""
+"""Core types shared across agentic-flow components.
+
+Import from submodules directly (for example ``core.orchestrator``,
+``core.models``). This package ``__init__`` intentionally avoids importing
+``core.orchestrator`` so agent modules can load ``core.claude_client`` without
+a circular import through ``agents``.
+"""
 
 from config import AgentClaudeConfig, Settings
-from core.claude_client import call_claude
 from core.exceptions import (
     AdapterError,
     AgentError,
@@ -21,32 +26,18 @@ from core.models import (
     RepoConfig,
     ReviewResult,
 )
-from core.orchestrator import (
-    DONE_LABEL,
-    IN_PROGRESS_LABEL,
-    NEEDS_HUMAN_LABEL,
-    ImplementationOrchestrator,
-    OrchestratorResult,
-    resolve_approach,
-)
 
 __all__ = [
     "AdapterError",
     "AgentClaudeConfig",
     "AgentError",
     "Approach",
-    "call_claude",
     "CodeMatch",
-    "DONE_LABEL",
     "EnvironmentError",
     "EnvironmentSetupError",
-    "IN_PROGRESS_LABEL",
-    "ImplementationOrchestrator",
     "ImplementationResult",
     "Investigation",
     "LinkedRepo",
-    "NEEDS_HUMAN_LABEL",
-    "OrchestratorResult",
     "ParsedIntent",
     "Proposal",
     "RelevantFile",
@@ -54,5 +45,4 @@ __all__ = [
     "ReviewResult",
     "Settings",
     "ToolError",
-    "resolve_approach",
 ]
