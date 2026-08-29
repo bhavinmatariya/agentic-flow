@@ -6,7 +6,7 @@ python-dotenv
 # Optional: full-stack live verification (Step 8 extension)
 playwright
 psycopg2-binary
-pymysql
+mysql-connector-python
 pymongo
 
 # After installing requirements, also run:

@@ -1,54 +1,41 @@
-name: Agentic Flow
-description: Investigate GitHub issues, propose fixes, and parse human replies.
-
+name: 'Agentic Flow'
+description: 'Autonomous issue investigation and fix agent'
 inputs:
   anthropic-api-key:
-    description: Anthropic API key for downstream agent steps.
     required: true
   github-token:
-    description: GitHub token with repo access for the target repository.
     required: true
   issue-number:
-    description: Issue number to process.
     required: true
   event:
-    description: >-
-      Event driving this run — issue_opened runs investigate/propose;
-      issue_comment parses a human reply.
     required: false
-    default: issue_opened
+    default: 'issue_opened'
   comment-body:
-    description: Body of the triggering issue comment (issue_comment events).
     required: false
-    default: ""
+    default: ''
   comment-author:
-    description: Login of the comment author (issue_comment events).
     required: false
-    default: ""
-
+    default: ''
 runs:
-  using: composite
+  using: 'composite'
   steps:
-    - name: Set up Python
-      uses: actions/setup-python@v5
+    - uses: actions/setup-python@v5
       with:
-        python-version: "3.11"
+        python-version: '3.11'
 
-    - name: Install dependencies
+    - name: Install Python dependencies
+      run: pip install -r ${{ github.action_path }}/requirements.txt
       shell: bash
-      run: pip install -r "${{ github.action_path }}/requirements.txt"
 
-    - name: Run agent
+    - name: Install Playwright browser
+      run: python -m playwright install --with-deps chromium
+      shell: bash
+
+    - name: Run agentic-flow
+      run: |
+        python ${{ github.action_path }}/main.py --event "${{ inputs.event }}" --issue-number "${{ inputs.issue-number }}" --comment-body "${{ inputs.comment-body }}" --comment-author "${{ inputs.comment-author }}"
       shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         GITHUB_REPO: ${{ github.repository }}
-        COMMENT_BODY: ${{ inputs.comment-body }}
-        COMMENT_AUTHOR: ${{ inputs.comment-author }}
-      run: |
-        python "${{ github.action_path }}/main.py" \
-          --issue-number "${{ inputs.issue-number }}" \
-          --event "${{ inputs.event }}" \
-          --comment-body "$COMMENT_BODY" \
-          --comment-author "$COMMENT_AUTHOR"

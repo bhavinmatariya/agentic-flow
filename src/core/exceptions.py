@@ -3,15 +3,22 @@
 ``AdapterError`` is defined on the Step 1 adapter contract and re-exported here
 so callers can import adapter and tool failures from one module. ``ToolError``
 covers context-gathering operations (clone, search, file I/O). ``AgentError``
-covers Claude API failures and invalid agent output. ``EnvironmentError``
-covers disposable test-environment setup and teardown failures.
+covers Claude API failures and invalid agent output. ``EnvironmentSetupError``
+covers disposable test-environment setup and teardown failures that must not be
+treated as code-quality review failures.
 """
 
 from __future__ import annotations
 
 from adapters.base import AdapterError
 
-__all__ = ["AdapterError", "AgentError", "EnvironmentError", "ToolError"]
+__all__ = [
+    "AdapterError",
+    "AgentError",
+    "EnvironmentError",
+    "EnvironmentSetupError",
+    "ToolError",
+]
 
 
 class ToolError(Exception):
@@ -32,9 +39,18 @@ class AgentError(Exception):
     """
 
 
-class EnvironmentError(Exception):
+class EnvironmentSetupError(Exception):
     """Raised when disposable test-environment setup or teardown fails.
 
-    Attach the original exception with ``raise EnvironmentError(...) from exc``
+    This indicates an infrastructure or tooling problem (Docker unavailable,
+    migrations failed, app health check timed out, DB connection errors), not
+    a defect in the code under review. Reviewers and orchestrators should catch
+    this separately from real verification failures.
+
+    Attach the original exception with ``raise EnvironmentSetupError(...) from exc``
     so callers can inspect both the human-readable step context and the cause.
     """
+
+
+# Backward-compatible alias used by earlier steps.
+EnvironmentError = EnvironmentSetupError

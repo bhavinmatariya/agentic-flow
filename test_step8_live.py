@@ -30,7 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from config import ConfigurationError, Settings
-from core.exceptions import EnvironmentError
+from core.exceptions import EnvironmentSetupError
 from tools.browser_test import BrowserTestTool
 from tools.code_search import CodeSearchTool
 from tools.db_verifier import DBVerifierTool
@@ -135,7 +135,7 @@ def main() -> int:
     except ConfigurationError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 1
-    except EnvironmentError as exc:
+    except EnvironmentSetupError as exc:
         print(f"Environment error: {exc}", file=sys.stderr)
         return 1
     finally:
@@ -299,7 +299,7 @@ def _checkout_branch(local_repo_path: str, branch_name: str) -> None:
             check=False,
         )
         if completed.returncode != 0:
-            raise EnvironmentError(
+            raise EnvironmentSetupError(
                 f"Could not checkout {branch_name!r}: {completed.stderr or completed.stdout}"
             )
 

@@ -2,7 +2,13 @@
 
 from config import AgentClaudeConfig, Settings
 from core.claude_client import call_claude
-from core.exceptions import AdapterError, AgentError, EnvironmentError, ToolError
+from core.exceptions import (
+    AdapterError,
+    AgentError,
+    EnvironmentError,
+    EnvironmentSetupError,
+    ToolError,
+)
 from core.models import (
     Approach,
     CodeMatch,
@@ -33,6 +39,7 @@ __all__ = [
     "CodeMatch",
     "DONE_LABEL",
     "EnvironmentError",
+    "EnvironmentSetupError",
     "IN_PROGRESS_LABEL",
     "ImplementationOrchestrator",
     "ImplementationResult",
