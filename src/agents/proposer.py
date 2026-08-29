@@ -8,6 +8,7 @@ from typing import Any, Final
 from anthropic import Anthropic
 
 from agents.base_agent import BaseAgent
+from config import Settings
 from core.models import Approach, Investigation, Proposal
 
 PROPOSER_SYSTEM_PROMPT: Final[str] = (
@@ -26,12 +27,21 @@ PROPOSER_SYSTEM_PROMPT: Final[str] = (
     "rough scope.\n"
     "- If the investigation raised open questions that materially change "
     "which approach is best, surface that ambiguity honestly in the "
-    "approach description rather than silently picking one assumption.\n\n"
+    "approach description rather than silently picking one assumption.\n"
+    "- Keep every field concise and scannable — this will be read as a "
+    "GitHub comment, not a design document. description: max 2 sentences. "
+    "why_it_works: max 2 sentences. tradeoffs: max 2 sentences, "
+    "bullet-style if there are multiple distinct tradeoffs. "
+    "estimated_scope: a short phrase, not a sentence (e.g. '~15 lines, "
+    "one file'). Do not repeat information across fields — if something "
+    "is already said in description, don't restate it in why_it_works.\n\n"
     "Respond with ONLY a JSON object matching this shape:\n"
     '{"approaches": [{"name": str, "nature": str, "description": str, '
     '"why_it_works": str, "risk": str, "tradeoffs": str, '
     '"estimated_scope": str}]}'
 )
+
+PROPOSAL_SECTION_HEADER: Final[str] = "## Proposed approaches"
 
 
 class ProposerAgent(BaseAgent):
@@ -41,14 +51,15 @@ class ProposerAgent(BaseAgent):
     findings already gathered by :class:`InvestigatorAgent`.
     """
 
-    def __init__(self, client: Anthropic, model: str) -> None:
+    def __init__(self, client: Anthropic, model: str, settings: Settings) -> None:
         """Create a proposer bound to an Anthropic client and model id.
 
         Args:
             client: Authenticated Anthropic SDK client.
-            model: Model identifier passed to ``messages.create``.
+            model: Model identifier passed to the centralized Claude client.
+            settings: Application settings with per-agent Claude defaults.
         """
-        super().__init__(client, model)
+        super().__init__(client, model, settings, "proposer")
         self.system_prompt = PROPOSER_SYSTEM_PROMPT
         self.tool_definitions = []
 
@@ -67,34 +78,58 @@ class ProposerAgent(BaseAgent):
         user_message = self._build_user_message(investigation)
         return self.run(user_message, Proposal)
 
-    def format_as_comment(self, proposal: Proposal) -> str:
+    def format_as_comment(
+        self,
+        proposal: Proposal,
+        investigation: Investigation | None = None,
+    ) -> str:
         """Render ``proposal`` as Markdown suitable for a GitHub issue comment.
 
         Args:
             proposal: Validated proposal to format for human review.
+            investigation: Optional investigation used for a one-line summary.
 
         Returns:
-            Markdown text with a numbered list of approaches and a closing
+            Markdown text with collapsible approach details and a closing
             prompt for the human to pick an option or approve a single one.
         """
-        lines: list[str] = ["## Proposed approaches", ""]
+        lines: list[str] = []
 
+        if investigation is not None:
+            lines.extend(
+                [
+                    "## Investigation summary",
+                    investigation.root_cause.strip(),
+                    "",
+                ]
+            )
+
+        lines.extend([PROPOSAL_SECTION_HEADER, ""])
+
+        single_approach = len(proposal.approaches) == 1
         for index, approach in enumerate(proposal.approaches, start=1):
-            lines.extend(_format_approach(index, approach))
+            if index > 1:
+                lines.extend(["---", ""])
+            lines.extend(
+                _format_approach_for_comment(
+                    approach,
+                    index=index,
+                    single_approach=single_approach,
+                )
+            )
             lines.append("")
 
-        if len(proposal.approaches) == 1:
+        if single_approach:
             closing = (
-                "Reply with **approved** (or describe any changes you want) "
-                "and we will proceed with this approach."
+                "**Reply 'approved' (or with any changes you'd like) to proceed.**"
             )
         else:
             closing = (
-                "Reply with the **number or name** of the approach you want "
-                "us to proceed with, or describe a variation you prefer."
+                "**Reply with the option number (or a variation you'd "
+                "prefer) to proceed.**"
             )
 
-        lines.extend(["---", closing])
+        lines.append(closing)
         return "\n".join(lines).strip()
 
     def _build_user_message(self, investigation: Investigation) -> str:
@@ -139,20 +174,48 @@ class ProposerAgent(BaseAgent):
         )
 
 
-def _format_approach(index: int, approach: Approach) -> list[str]:
-    """Return Markdown lines for one numbered approach."""
-    return [
-        f"### {index}. {approach.name}",
-        "",
-        f"**Nature:** {approach.nature}",
-        "",
-        f"**Description:** {approach.description}",
-        "",
-        f"**Why it works:** {approach.why_it_works}",
-        "",
-        f"**Risk:** {approach.risk}",
-        "",
-        f"**Tradeoffs:** {approach.tradeoffs}",
-        "",
-        f"**Estimated scope:** {approach.estimated_scope}",
-    ]
+def _risk_emoji(risk: str) -> str:
+    """Map free-text risk to a GitHub-friendly emoji marker."""
+    lowered = risk.lower()
+    if "high" in lowered:
+        return ":red_circle:"
+    if "medium" in lowered or "med" in lowered:
+        return ":large_yellow_circle:"
+    if "low" in lowered:
+        return ":large_green_circle:"
+    return ":large_yellow_circle:"
+
+
+def _format_approach_for_comment(
+    approach: Approach,
+    *,
+    index: int,
+    single_approach: bool,
+) -> list[str]:
+    """Return Markdown lines for one approach in the GitHub comment layout."""
+    lines: list[str] = []
+
+    if single_approach:
+        lines.append(f"**{approach.nature}** — {approach.description}")
+    else:
+        emoji = _risk_emoji(approach.risk)
+        lines.append(
+            f"### Option {index}: {approach.name} — {emoji} {approach.risk}"
+        )
+        lines.append("")
+        lines.append(f"**{approach.nature}** — {approach.description}")
+
+    lines.extend(
+        [
+            "",
+            "<details>",
+            "<summary>Why this works, tradeoffs, and scope</summary>",
+            "",
+            f"- **Why it works:** {approach.why_it_works}",
+            f"- **Tradeoffs:** {approach.tradeoffs}",
+            f"- **Scope:** {approach.estimated_scope}",
+            "",
+            "</details>",
+        ]
+    )
+    return lines

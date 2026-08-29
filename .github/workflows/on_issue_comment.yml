@@ -1,0 +1,24 @@
+# Example workflow for consumer repos (e.g. Test-Adbee).
+# Triggers the agentic-flow reusable action when someone comments on an issue.
+name: Agent on issue comment
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Run agentic-flow on comment
+        uses: bhavinmatariya/agentic-flow@main
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.issue.number }}
+          event: issue_comment
+          comment-body: ${{ github.event.comment.body }}
+          comment-author: ${{ github.event.comment.user.login }}

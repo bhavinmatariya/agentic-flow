@@ -3,14 +3,15 @@
 ``AdapterError`` is defined on the Step 1 adapter contract and re-exported here
 so callers can import adapter and tool failures from one module. ``ToolError``
 covers context-gathering operations (clone, search, file I/O). ``AgentError``
-covers Claude API failures and invalid agent output.
+covers Claude API failures and invalid agent output. ``EnvironmentError``
+covers disposable test-environment setup and teardown failures.
 """
 
 from __future__ import annotations
 
 from adapters.base import AdapterError
 
-__all__ = ["AdapterError", "AgentError", "ToolError"]
+__all__ = ["AdapterError", "AgentError", "EnvironmentError", "ToolError"]
 
 
 class ToolError(Exception):
@@ -28,4 +29,12 @@ class AgentError(Exception):
     Attach the original exception with ``raise AgentError(...) from exc`` for API
     failures, JSON parse errors, and pydantic validation errors so callers can
     inspect both the message and the underlying cause.
+    """
+
+
+class EnvironmentError(Exception):
+    """Raised when disposable test-environment setup or teardown fails.
+
+    Attach the original exception with ``raise EnvironmentError(...) from exc``
+    so callers can inspect both the human-readable step context and the cause.
     """

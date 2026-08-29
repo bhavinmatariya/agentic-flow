@@ -6,9 +6,9 @@ of one of these models so values are validated and typed rather than raw dicts.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def _require_github_slug(value: str, *, field_name: str) -> str:
@@ -175,3 +175,74 @@ class Proposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     approaches: list[Approach] = Field(..., min_length=1)
+
+
+class ParsedIntent(BaseModel):
+    """Structured interpretation of a human reply to a fix proposal.
+
+    Attributes:
+        intent: Whether the human approved, asked for revision, or said
+            something unrelated to choosing an approach.
+        selected_approach: Name or reference to the chosen approach when
+            ``intent`` is ``approve``; otherwise ``None``.
+        feedback: Revision notes when ``intent`` is ``revise``; must be
+            ``None`` for all other intents.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    intent: Literal["approve", "revise", "unrelated"]
+    selected_approach: str | None = None
+    feedback: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_feedback_for_intent(self) -> ParsedIntent:
+        """Ensure ``feedback`` is present only for revision intents."""
+        if self.intent == "revise":
+            if self.feedback is None or not self.feedback.strip():
+                raise ValueError("feedback must be set when intent is 'revise'")
+            return self
+        if self.feedback is not None:
+            raise ValueError("feedback must be null unless intent is 'revise'")
+        return self
+
+
+class ImplementationResult(BaseModel):
+    """Outcome of the implementer agent's code changes.
+
+    Attributes:
+        branch_name: Branch where the fix was committed.
+        files_changed: Repository-relative paths that were edited.
+        summary: Plain-language summary of what was implemented.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    branch_name: str = Field(..., min_length=1)
+    files_changed: list[str] = Field(default_factory=list)
+    summary: str = Field(..., min_length=1)
+
+
+class ReviewResult(BaseModel):
+    """Self-review outcome from the reviewer agent.
+
+    Attributes:
+        approved: Whether the change is ready to open as a pull request.
+        summary: Overall review verdict in plain language.
+        findings: Specific issues, test failures, or verification notes.
+        layers_detected: Which change layers were detected in the diff
+            (for example frontend, database, backend flags).
+        ui_verification: Playwright live UI check result when the full-stack
+            tier ran; ``None`` when live UI verification did not apply.
+        db_verification: Independent database row check when the full-stack
+            tier ran; ``None`` when live DB verification did not apply.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    approved: bool
+    summary: str = Field(..., min_length=1)
+    findings: list[str] = Field(default_factory=list)
+    layers_detected: dict[str, bool] = Field(default_factory=dict)
+    ui_verification: dict[str, Any] | None = None
+    db_verification: dict[str, Any] | None = None

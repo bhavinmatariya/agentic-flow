@@ -6,16 +6,17 @@ import json
 from abc import ABC, abstractmethod
 from typing import Any, TypeVar
 
-from anthropic import Anthropic, AnthropicError
+from anthropic import Anthropic
 from pydantic import BaseModel, ValidationError
 
+from config import Settings
+from core.claude_client import call_claude
 from core.exceptions import AgentError
 from utils.logger import get_logger
 
 TModel = TypeVar("TModel", bound=BaseModel)
 
 _MAX_TOOL_ROUNDS: int = 25
-_MAX_OUTPUT_TOKENS: int = 8192
 
 
 class BaseAgent(ABC):
@@ -29,52 +30,40 @@ class BaseAgent(ABC):
     system_prompt: str
     tool_definitions: list[dict[str, Any]]
 
-    def __init__(self, client: Anthropic, model: str) -> None:
-        """Bind this agent to an Anthropic client and model id.
+    def __init__(
+        self,
+        client: Anthropic,
+        model: str,
+        settings: Settings,
+        agent_type: str,
+    ) -> None:
+        """Bind this agent to an Anthropic client, model, and Claude settings.
 
         Args:
             client: Authenticated Anthropic SDK client.
-            model: Model identifier passed to ``messages.create``.
+            model: Model identifier passed to the centralized Claude client.
+            settings: Application settings containing per-agent Claude defaults.
+            agent_type: Logical agent name used to select effort/temperature/
+                max_tokens (for example ``investigator``).
         """
         self._client = client
         self._model = model
+        self._settings = settings
+        self._agent_type = agent_type
+        config = settings.agent_config(agent_type)
+        self._effort = config.effort
+        self._temperature = config.temperature
+        self._max_tokens = config.max_tokens
         self._logger = get_logger(__name__)
         self.system_prompt = ""
         self.tool_definitions = []
 
     @abstractmethod
     def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
-        """Run one tool and return its result as text.
-
-        Anthropic ``tool_result`` content must be a string, so structured
-        values should be JSON-encoded by the subclass.
-
-        Args:
-            tool_name: Name from the model's ``tool_use`` block.
-            tool_input: Arguments supplied by the model.
-
-        Returns:
-            Text (often JSON) to send back as the tool result.
-        """
+        """Run one tool and return its result as text."""
 
     def run(self, user_message: str, output_model: type[TModel]) -> TModel:
-        """Send ``user_message`` through the tool-use loop and validate the answer.
-
-        The conversation is replayed until Claude stops with a text response
-        (not ``tool_use``). That text is parsed as JSON and validated against
-        ``output_model``.
-
-        Args:
-            user_message: The user turn that starts the investigation.
-            output_model: Pydantic model class the final JSON must match.
-
-        Returns:
-            A validated instance of ``output_model``.
-
-        Raises:
-            AgentError: If the Claude API fails, the loop exceeds the round
-                limit, the final text is not JSON, or validation fails.
-        """
+        """Send ``user_message`` through the tool-use loop and validate the answer."""
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": user_message},
         ]
@@ -112,19 +101,19 @@ class BaseAgent(ABC):
         )
 
     def _create_message(self, messages: list[dict[str, Any]]) -> Any:
-        """Call the Messages API and wrap SDK failures as :class:`AgentError`."""
-        try:
-            return self._client.messages.create(
-                model=self._model,
-                max_tokens=_MAX_OUTPUT_TOKENS,
-                system=self.system_prompt,
-                tools=self.tool_definitions,
-                messages=messages,
-            )
-        except AnthropicError as exc:
-            raise AgentError(f"Claude API error: {exc}") from exc
-        except Exception as exc:
-            raise AgentError(f"Claude request failed: {exc}") from exc
+        """Call Claude through the centralized client."""
+        return call_claude(
+            self._client,
+            self._model,
+            self.system_prompt,
+            messages,
+            self.tool_definitions,
+            self._effort,
+            self._temperature,
+            self._max_tokens,
+            agent_name=self._agent_type,
+            logger=self._logger,
+        )
 
     def _run_tool_calls(self, response: Any) -> list[dict[str, Any]]:
         """Execute every ``tool_use`` block and build ``tool_result`` payloads."""
@@ -208,17 +197,7 @@ class BaseAgent(ABC):
 
 
 def _extract_json_object(text: str) -> Any:
-    """Load a JSON object from model text, including fenced markdown blocks.
-
-    Args:
-        text: Raw assistant text that should contain a JSON object.
-
-    Returns:
-        The decoded JSON value.
-
-    Raises:
-        json.JSONDecodeError: If no JSON object can be parsed.
-    """
+    """Load a JSON object from model text, including fenced markdown blocks."""
     stripped = text.strip()
     if stripped.startswith("```"):
         lines = stripped.split("\n")

@@ -155,6 +155,37 @@ class GitHubAdapter(IssueProviderAdapter):
         self._wrap(f"create_branch({branch_name!r}, from_ref={from_ref!r})", _create)
         logger.info("Created branch %r from %r", branch_name, from_ref)
 
+    def get_file_content(self, repo_full_name: str, path: str, ref: str) -> str:
+        """Fetch a file's current live content from GitHub at ``ref``."""
+        normalized_path = path.replace("\\", "/").lstrip("/")
+        if not normalized_path:
+            raise AdapterError("path must be a non-empty repository-relative file path")
+
+        def _fetch() -> str:
+            repo = (
+                self._repo
+                if repo_full_name == self._settings.github_repo
+                else self._github.get_repo(repo_full_name)
+            )
+            contents = repo.get_contents(normalized_path, ref=ref)
+            if isinstance(contents, list):
+                raise AdapterError(
+                    f"Path {normalized_path!r} is a directory, not a file, "
+                    f"in {repo_full_name}@{ref}"
+                )
+            try:
+                return contents.decoded_content.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise AdapterError(
+                    f"File {normalized_path!r} in {repo_full_name}@{ref} "
+                    "is not valid UTF-8 text"
+                ) from exc
+
+        return self._wrap(
+            f"get_file_content({repo_full_name}, {normalized_path!r}, ref={ref!r})",
+            _fetch,
+        )
+
     def commit_file(
         self,
         branch_name: str,

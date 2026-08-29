@@ -137,11 +137,12 @@ def main() -> int:
         investigator = InvestigatorAgent(
             client,
             args.model,
+            settings,
             tool,
             settings.github_token,
             linked_config_path=str(repos_json),
         )
-        proposer = ProposerAgent(client, args.model)
+        proposer = ProposerAgent(client, args.model, settings)
 
         try:
             investigation = investigator.investigate(
@@ -163,7 +164,7 @@ def main() -> int:
 
     _print_proposal(proposal)
 
-    comment = proposer.format_as_comment(proposal)
+    comment = proposer.format_as_comment(proposal, investigation)
     print("=== Formatted GitHub comment (not posted) ===")
     print()
     print(comment)

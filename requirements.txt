@@ -2,3 +2,12 @@ anthropic
 PyGithub
 pydantic
 python-dotenv
+
+# Optional: full-stack live verification (Step 8 extension)
+playwright
+psycopg2-binary
+pymysql
+pymongo
+
+# After installing requirements, also run:
+#   playwright install chromium

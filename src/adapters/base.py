@@ -59,6 +59,19 @@ class IssueProviderAdapter(ABC):
         """Create a new branch pointing at the tip of ``from_ref``."""
 
     @abstractmethod
+    def get_file_content(self, repo_full_name: str, path: str, ref: str) -> str:
+        """Fetch a file's live text content from a repository at ``ref``.
+
+        Args:
+            repo_full_name: Repository slug in ``owner/repository`` form.
+            path: Repository-relative path to the file.
+            ref: Branch name, tag, or commit SHA to read from.
+
+        Returns:
+            The file contents decoded as UTF-8 text.
+        """
+
+    @abstractmethod
     def commit_file(
         self,
         branch_name: str,

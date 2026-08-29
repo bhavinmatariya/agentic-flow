@@ -116,6 +116,7 @@ def main() -> int:
         agent = InvestigatorAgent(
             client,
             args.model,
+            settings,
             tool,
             settings.github_token,
             linked_config_path=str(repos_json),

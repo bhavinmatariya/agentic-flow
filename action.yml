@@ -1,5 +1,5 @@
 name: Agentic Flow
-description: Acknowledge a GitHub issue by posting an agent comment.
+description: Investigate GitHub issues, propose fixes, and parse human replies.
 
 inputs:
   anthropic-api-key:
@@ -9,8 +9,22 @@ inputs:
     description: GitHub token with repo access for the target repository.
     required: true
   issue-number:
-    description: Issue number to acknowledge.
+    description: Issue number to process.
     required: true
+  event:
+    description: >-
+      Event driving this run — issue_opened runs investigate/propose;
+      issue_comment parses a human reply.
+    required: false
+    default: issue_opened
+  comment-body:
+    description: Body of the triggering issue comment (issue_comment events).
+    required: false
+    default: ""
+  comment-author:
+    description: Login of the comment author (issue_comment events).
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -24,10 +38,17 @@ runs:
       shell: bash
       run: pip install -r "${{ github.action_path }}/requirements.txt"
 
-    - name: Acknowledge issue
+    - name: Run agent
       shell: bash
-      run: python "${{ github.action_path }}/main.py" --issue-number "${{ inputs.issue-number }}"
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         GITHUB_REPO: ${{ github.repository }}
+        COMMENT_BODY: ${{ inputs.comment-body }}
+        COMMENT_AUTHOR: ${{ inputs.comment-author }}
+      run: |
+        python "${{ github.action_path }}/main.py" \
+          --issue-number "${{ inputs.issue-number }}" \
+          --event "${{ inputs.event }}" \
+          --comment-body "$COMMENT_BODY" \
+          --comment-author "$COMMENT_AUTHOR"

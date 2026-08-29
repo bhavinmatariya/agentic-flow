@@ -8,6 +8,7 @@ from typing import Any, Final
 from anthropic import Anthropic
 
 from agents.base_agent import BaseAgent
+from config import Settings
 from core.exceptions import AgentError, ToolError
 from core.models import Investigation
 from tools.code_search import CodeSearchTool
@@ -153,6 +154,7 @@ class InvestigatorAgent(BaseAgent):
         self,
         client: Anthropic,
         model: str,
+        settings: Settings,
         code_search: CodeSearchTool,
         github_token: str,
         *,
@@ -162,14 +164,15 @@ class InvestigatorAgent(BaseAgent):
 
         Args:
             client: Authenticated Anthropic SDK client.
-            model: Model identifier passed to ``messages.create``.
+            model: Model identifier passed to the centralized Claude client.
+            settings: Application settings with per-agent Claude defaults.
             code_search: Context-gathering tool used to clone and inspect repos.
             github_token: Token with read access for ``clone_repo``. Not sent
                 to Claude.
             linked_config_path: Optional ``repos.json`` path. A missing file
                 means no linked repos (cross-repo search is optional).
         """
-        super().__init__(client, model)
+        super().__init__(client, model, settings, "investigator")
         self._code_search = code_search
         self._github_token = github_token.strip()
         if not self._github_token:
