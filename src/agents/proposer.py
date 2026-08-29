@@ -34,7 +34,9 @@ PROPOSER_SYSTEM_PROMPT: Final[str] = (
     "bullet-style if there are multiple distinct tradeoffs. "
     "estimated_scope: a short phrase, not a sentence (e.g. '~15 lines, "
     "one file'). Do not repeat information across fields — if something "
-    "is already said in description, don't restate it in why_it_works.\n\n"
+    "is already said in description, don't restate it in why_it_works.\n"
+    "- For the risk field, use ONLY the word low, medium, or high (no emoji, "
+    "no colon shortcodes like :large_green_circle:, no extra prose).\n\n"
     "Respond with ONLY a JSON object matching this shape:\n"
     '{"approaches": [{"name": str, "nature": str, "description": str, '
     '"why_it_works": str, "risk": str, "tradeoffs": str, '
@@ -174,16 +176,41 @@ class ProposerAgent(BaseAgent):
         )
 
 
-def _risk_emoji(risk: str) -> str:
-    """Map free-text risk to a GitHub-friendly emoji marker."""
-    lowered = risk.lower()
-    if "high" in lowered:
-        return ":red_circle:"
-    if "medium" in lowered or "med" in lowered:
-        return ":large_yellow_circle:"
-    if "low" in lowered:
-        return ":large_green_circle:"
-    return ":large_yellow_circle:"
+def _normalize_risk_level(risk: str) -> str:
+    """Return ``low``, ``medium``, or ``high`` from free-text or noisy model output."""
+    cleaned = risk.strip()
+    for token in (
+        ":large_green_circle:",
+        ":green_circle:",
+        ":large_yellow_circle:",
+        ":yellow_circle:",
+        ":red_circle:",
+        "large_green_circle",
+        "large_yellow_circle",
+        "red_circle",
+        "green_circle",
+        "yellow_circle",
+    ):
+        cleaned = cleaned.replace(token, "")
+    cleaned = cleaned.strip(" -—:").lower()
+    if "high" in cleaned:
+        return "high"
+    if "medium" in cleaned or cleaned == "med":
+        return "medium"
+    if "low" in cleaned:
+        return "low"
+    return "medium"
+
+
+def _risk_display(risk: str) -> tuple[str, str]:
+    """Return a visible emoji plus a short risk label for GitHub comments."""
+    level = _normalize_risk_level(risk)
+    emoji_by_level = {
+        "low": "🟢",
+        "medium": "🟡",
+        "high": "🔴",
+    }
+    return emoji_by_level[level], level
 
 
 def _format_approach_for_comment(
@@ -198,9 +225,9 @@ def _format_approach_for_comment(
     if single_approach:
         lines.append(f"**{approach.nature}** — {approach.description}")
     else:
-        emoji = _risk_emoji(approach.risk)
+        emoji, risk_level = _risk_display(approach.risk)
         lines.append(
-            f"### Option {index}: {approach.name} — {emoji} {approach.risk}"
+            f"### Option {index}: {approach.name} — {emoji} {risk_level}"
         )
         lines.append("")
         lines.append(f"**{approach.nature}** — {approach.description}")

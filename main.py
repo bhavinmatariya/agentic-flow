@@ -16,7 +16,6 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from anthropic import Anthropic
-from github import Auth, Github
 
 from adapters.base import AdapterError
 from adapters.github_adapter import GitHubAdapter
@@ -95,22 +94,14 @@ def _post_agent_error(
         )
 
 
-def _bot_username(settings: Settings) -> str:
-    """Return the GitHub login for the token used by this run."""
-    github = Github(auth=Auth.Token(settings.github_token))
-    return github.get_user().login
-
-
 def _find_latest_proposal_comment(
     comments: list[dict[str, Any]],
-    bot_username: str,
 ) -> dict[str, Any] | None:
     """Return the most recent agent proposal comment, if any."""
     proposals = [
         comment
         for comment in comments
-        if comment.get("author") == bot_username
-        and isinstance(comment.get("body"), str)
+        if isinstance(comment.get("body"), str)
         and PROPOSAL_COMMENT_HEADER in comment["body"]
     ]
     if not proposals:
@@ -230,15 +221,6 @@ def _handle_issue_comment(
     repos_json: Path,
 ) -> int:
     """Parse a human reply and run the full pipeline when approved."""
-    bot_user = _bot_username(settings)
-    if comment_author == bot_user:
-        logger.info(
-            "Ignoring comment on issue #%s from bot user %r",
-            issue_number,
-            bot_user,
-        )
-        return 0
-
     if not adapter.has_label(issue_number, AWAITING_APPROVAL_LABEL):
         logger.info(
             "Issue #%s does not have label %r; nothing to do",
@@ -249,12 +231,18 @@ def _handle_issue_comment(
 
     issue = adapter.get_issue(issue_number)
     comments = adapter.list_comments(issue_number)
-    proposal_comment = _find_latest_proposal_comment(comments, bot_user)
+    proposal_comment = _find_latest_proposal_comment(comments)
     if proposal_comment is None:
         raise AgentError(
             f"Issue #{issue_number} has {AWAITING_APPROVAL_LABEL!r} but no "
-            f"proposal comment from {bot_user!r} was found."
+            f"proposal comment containing {PROPOSAL_COMMENT_HEADER!r} was found."
         )
+
+    logger.info(
+        "Processing issue comment on #%s from %r",
+        issue_number,
+        comment_author,
+    )
 
     with tempfile.TemporaryDirectory(prefix="agentic-flow-comment-") as tmp:
         agents = _build_pipeline_agents(
