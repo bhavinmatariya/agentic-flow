@@ -14,7 +14,7 @@ from anthropic import Anthropic
 from agents.base_agent import BaseAgent
 from config import Settings
 from core.exceptions import AgentError, EnvironmentSetupError, ToolError
-from core.models import ImplementationResult, Investigation, ReviewResult
+from core.models import ImplementationResult, Investigation, ReviewResult, Subtask
 from tools.browser_test import (
     BrowserLaunchError,
     BrowserTestTool,
@@ -79,6 +79,10 @@ REVIEWER_SYSTEM_PROMPT: Final[str] = (
     "database you just created.\n\n"
     "When live verification does not apply, set ui_verification and "
     "db_verification to null.\n\n"
+    "When reviewing a single subtask (not the final one), approve if THAT "
+    "subtask's scope is correctly implemented; do not reject because later "
+    "subtasks are not done yet. Skip live verification unless this is the "
+    "final subtask AND both frontend and database layers apply.\n\n"
     "Extract every concrete literal detail mentioned in the human's request or "
     "approved approach (exact colors, copy/text, specific values, named "
     "behaviors). Check the actual diff against each one individually. If any "
@@ -164,6 +168,10 @@ class ReviewerAgent(BaseAgent):
         primary_repo: str,
         *,
         human_approval_text: str | None = None,
+        subtask: Subtask | None = None,
+        subtask_index: int | None = None,
+        subtask_total: int | None = None,
+        is_final_subtask: bool = True,
     ) -> ReviewResult:
         """Review ``implementation`` on its branch and return a :class:`ReviewResult`."""
         local_repo_path = self._code_search.clone_repo(primary_repo, self._github_token)
@@ -189,9 +197,13 @@ class ReviewerAgent(BaseAgent):
             "layers": layers,
             "human_approval_text": human_approval_text,
             "automated_checks": automated_checks,
+            "subtask": subtask,
+            "subtask_index": subtask_index,
+            "subtask_total": subtask_total,
+            "is_final_subtask": is_final_subtask,
         }
 
-        if layers.get("frontend") and layers.get("database"):
+        if layers.get("frontend") and layers.get("database") and is_final_subtask:
             self._effort = self._settings.reviewer_live_effort
             self._live_state = _LiveVerificationState(
                 deadline=time.monotonic() + _LIVE_VERIFICATION_BUDGET_SECONDS,
@@ -206,6 +218,10 @@ class ReviewerAgent(BaseAgent):
             layers=layers,
             human_approval_text=human_approval_text,
             automated_checks=automated_checks,
+            subtask=subtask,
+            subtask_index=subtask_index,
+            subtask_total=subtask_total,
+            is_final_subtask=is_final_subtask,
         )
         try:
             review = self.run(user_message, ReviewResult)
@@ -277,6 +293,10 @@ class ReviewerAgent(BaseAgent):
         human_approval_text: str | None = None,
         live_verification_note: str | None = None,
         automated_checks: AutomatedCheckResult | None = None,
+        subtask: Subtask | None = None,
+        subtask_index: int | None = None,
+        subtask_total: int | None = None,
+        is_final_subtask: bool = True,
     ) -> str:
         issue_body = str(issue.get("body") or "").strip() or "(empty)"
         files_block = "\n".join(f"- {path}" for path in implementation.files_changed) or "(none)"
@@ -298,8 +318,25 @@ class ReviewerAgent(BaseAgent):
             f"Files changed:\n{files_block}\n\n"
             f"Precomputed layers_detected: {json.dumps(layers)}\n\n"
             "Start by calling detect_change_layers with files_changed. "
-            "Run live verification only when both frontend and database are true."
+            "Run live verification only when both frontend and database are true "
+            "and this is the final subtask."
         )
+        if subtask is not None:
+            index_text = (
+                f"{subtask_index}/{subtask_total}"
+                if subtask_index is not None and subtask_total is not None
+                else "?"
+            )
+            message += (
+                f"\n\nSubtask review ({index_text}): **{subtask.name}**\n"
+                f"{subtask.description}\n"
+                f"Scope for this review: {subtask.scope}\n"
+            )
+            if not is_final_subtask:
+                message += (
+                    "\nThis is NOT the final subtask — approve when this slice "
+                    "is correct; later subtasks may still be pending.\n"
+                )
         if automated_checks is not None:
             if automated_checks.findings:
                 message += (
@@ -346,6 +383,10 @@ class ReviewerAgent(BaseAgent):
             human_approval_text=context.get("human_approval_text"),
             live_verification_note=reason,
             automated_checks=context.get("automated_checks"),
+            subtask=context.get("subtask"),
+            subtask_index=context.get("subtask_index"),
+            subtask_total=context.get("subtask_total"),
+            is_final_subtask=bool(context.get("is_final_subtask", True)),
         )
         review = self.run(fallback_message, ReviewResult)
         review = _normalize_skipped_ui_verification(review)

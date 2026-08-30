@@ -177,6 +177,40 @@ class Proposal(BaseModel):
     approaches: list[Approach] = Field(..., min_length=1)
 
 
+class Subtask(BaseModel):
+    """One ordered slice of an approved approach for sequential implementation.
+
+    Attributes:
+        name: Short title for this step.
+        description: What to implement in this step only.
+        scope: Rough touch-area estimate (files/layers), kept small.
+        order: 1-based execution order.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(..., min_length=1)
+    description: str = Field(..., min_length=1)
+    scope: str = Field(..., min_length=1)
+    order: int = Field(..., ge=1)
+
+
+class SubtaskPlan(BaseModel):
+    """Ordered subtasks covering an approved approach end-to-end."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subtasks: list[Subtask] = Field(..., min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def _sort_subtasks(self) -> SubtaskPlan:
+        """Store subtasks in ascending ``order``."""
+        ordered = sorted(self.subtasks, key=lambda item: item.order)
+        if ordered != self.subtasks:
+            object.__setattr__(self, "subtasks", ordered)
+        return self
+
+
 class ParsedIntent(BaseModel):
     """Structured interpretation of a human reply to a fix proposal.
 

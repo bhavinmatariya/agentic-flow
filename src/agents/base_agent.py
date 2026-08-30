@@ -111,6 +111,30 @@ class BaseAgent(ABC):
 
             final_text = self._collect_text(response)
             if not final_text.strip():
+                if stop_reason == "max_tokens":
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": self._assistant_content(response),
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Your previous response hit the output token limit "
+                                "before finishing. Do NOT call more tools. Respond "
+                                "with ONLY the final JSON object required by your "
+                                "instructions — no prose, no markdown fences."
+                            ),
+                        }
+                    )
+                    self._logger.warning(
+                        "Agent %s hit max_tokens on turn %d; requesting final JSON only",
+                        self._agent_type,
+                        turn,
+                    )
+                    continue
                 raise AgentError(
                     f"Claude returned no text (stop_reason={stop_reason!r}). "
                     "The model must emit a JSON object matching the output schema."

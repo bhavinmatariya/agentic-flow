@@ -10,7 +10,7 @@ from anthropic import Anthropic
 from agents.base_agent import BaseAgent
 from config import Settings
 from core.exceptions import AgentError, ToolError
-from core.models import Approach, ImplementationResult, Investigation
+from core.models import Approach, ImplementationResult, Investigation, Subtask
 from tools.code_editor import CodeEditTool
 from tools.code_search import CodeSearchTool
 
@@ -45,7 +45,10 @@ IMPLEMENTER_SYSTEM_PROMPT: Final[str] = (
     "two competing implementations of the same behavior (conflicting CSS "
     "rules, duplicate state, overlapping logic, etc.). If so, resolve the "
     "conflict directly — remove or override the losing one — rather than "
-    "leaving both in place and hoping yours wins.\n\n"
+    "leaving both in place and hoping yours wins.\n"
+    "9. When a CURRENT SUBTASK block is provided, implement ONLY that subtask. "
+    "Do not implement later subtasks or out-of-scope parts of the full "
+    "approach in this session.\n\n"
     "When finished, respond with ONLY JSON: {\"branch_name\": str, "
     "\"files_changed\": [str], \"summary\": str}"
 )
@@ -205,6 +208,9 @@ class ImplementerAgent(BaseAgent):
         review_findings: list[str] | None = None,
         attempt_failure_note: str | None = None,
         existing_branch: str | None = None,
+        subtask: Subtask | None = None,
+        subtask_index: int | None = None,
+        subtask_total: int | None = None,
     ) -> ImplementationResult:
         """Apply ``approach`` on a dedicated branch and return the outcome.
 
@@ -252,6 +258,9 @@ class ImplementerAgent(BaseAgent):
             human_approval_text=human_approval_text,
             review_findings=review_findings,
             attempt_failure_note=attempt_failure_note,
+            subtask=subtask,
+            subtask_index=subtask_index,
+            subtask_total=subtask_total,
         )
         result = self.run(user_message, ImplementationResult)
         if result.branch_name != branch_name:
@@ -275,6 +284,9 @@ class ImplementerAgent(BaseAgent):
         human_approval_text: str | None = None,
         review_findings: list[str] | None = None,
         attempt_failure_note: str | None = None,
+        subtask: Subtask | None = None,
+        subtask_index: int | None = None,
+        subtask_total: int | None = None,
     ) -> str:
         """Assemble the user turn from issue, investigation, and approach context."""
         issue_body = str(issue.get("body") or "").strip() or "(empty)"
@@ -321,6 +333,19 @@ class ImplementerAgent(BaseAgent):
                 "Previous attempt failure (from the last round only — fix this "
                 "before proceeding):\n"
                 f"{attempt_failure_note.strip()}\n\n"
+            )
+        if subtask is not None:
+            index_text = (
+                f"{subtask_index}/{subtask_total}"
+                if subtask_index is not None and subtask_total is not None
+                else "?"
+            )
+            message += (
+                f"CURRENT SUBTASK ({index_text}) — implement ONLY this step now:\n"
+                f"- Name: {subtask.name}\n"
+                f"- Description: {subtask.description}\n"
+                f"- Scope: {subtask.scope}\n\n"
+                "Do not implement other subtasks in this session.\n\n"
             )
         message += (
             f"Issue nature:\n{investigation.issue_nature}\n\n"

@@ -27,6 +27,7 @@ _AGENT_DEFAULTS: dict[str, AgentClaudeConfig] = {
     "response_parser": AgentClaudeConfig(effort="low", temperature=0.0, max_tokens=2000),
     "implementer": AgentClaudeConfig(effort="xhigh", temperature=0.0, max_tokens=16000),
     "reviewer": AgentClaudeConfig(effort="high", temperature=0.0, max_tokens=16000),
+    "task_decomposer": AgentClaudeConfig(effort="high", temperature=0.0, max_tokens=8000),
 }
 
 
@@ -48,6 +49,7 @@ class Settings:
     response_parser: AgentClaudeConfig
     implementer: AgentClaudeConfig
     reviewer: AgentClaudeConfig
+    task_decomposer: AgentClaudeConfig
     reviewer_live_effort: str
 
     @classmethod
@@ -86,6 +88,7 @@ class Settings:
             response_parser=_load_agent_config("response_parser"),
             implementer=_load_agent_config("implementer"),
             reviewer=_load_agent_config("reviewer"),
+            task_decomposer=_load_agent_config("task_decomposer"),
             reviewer_live_effort=_env_str("REVIEWER_LIVE_EFFORT", "xhigh"),
         )
 
@@ -98,6 +101,7 @@ class Settings:
             "response_parser": self.response_parser,
             "implementer": self.implementer,
             "reviewer": self.reviewer,
+            "task_decomposer": self.task_decomposer,
         }
         if normalized not in mapping:
             raise ConfigurationError(f"Unknown agent type for Claude config: {agent_type!r}")

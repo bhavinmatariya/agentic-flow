@@ -29,6 +29,7 @@ from agents.implementer import ImplementerAgent
 from agents.investigator import InvestigatorAgent
 from agents.proposer import ProposerAgent
 from agents.reviewer import ReviewerAgent
+from agents.task_decomposer import TaskDecomposerAgent
 from config import ConfigurationError, Settings
 from core.exceptions import AgentError
 from core.models import Investigation, Proposal
@@ -137,7 +138,10 @@ def main() -> int:
             db_verifier,
             settings.github_token,
         )
-        orchestrator = ImplementationOrchestrator(adapter, implementer, reviewer)
+        decomposer = TaskDecomposerAgent(client, args.model, settings)
+        orchestrator = ImplementationOrchestrator(
+            adapter, implementer, reviewer, decomposer
+        )
 
         try:
             investigation = investigator.investigate(
@@ -173,6 +177,7 @@ def main() -> int:
                 selected,
                 settings.github_repo,
                 args.issue_number,
+                proposal=proposal,
             )
         except (AdapterError, AgentError) as exc:
             print(f"Orchestrator error: {exc}", file=sys.stderr)
