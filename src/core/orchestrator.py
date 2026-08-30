@@ -661,11 +661,14 @@ class ImplementationOrchestrator:
                         repo_session=repo_session,
                         baseline_implementation=baseline_implementation,
                         require_fresh_commits=(
-                            round_index == 1
-                            and not baseline_verified
-                            and not review_findings
-                        )
-                        or phantom_findings,
+                            implement_only
+                            or (
+                                round_index == 1
+                                and not baseline_verified
+                                and not review_findings
+                            )
+                            or phantom_findings
+                        ),
                     )
             except Exception as exc:
                 short_error = _short_error(exc)
@@ -775,6 +778,31 @@ class ImplementationOrchestrator:
                 )
 
             if implement_only:
+                if not self._implementer.last_committed_paths:
+                    self._logger.warning(
+                        "implement_only subtask %d/%d round %d for issue #%s "
+                        "completed without edit_file commits; retrying",
+                        subtask_index,
+                        subtask_total,
+                        round_index,
+                        issue_number,
+                    )
+                    last_round_failure_note = (
+                        "This subtask requires at least one successful edit_file "
+                        "commit on the branch before you return success JSON. "
+                        "Do not claim work is done by listing files that already "
+                        "exist — call edit_file for each change."
+                    )
+                    history.append(
+                        {
+                            "subtask": subtask.name,
+                            "subtask_index": subtask_index,
+                            "round": round_index,
+                            "stage": "implement_only_no_commit",
+                            "implementation_summary": implementation.summary,
+                        }
+                    )
+                    continue
                 last_implementation = implementation
                 history.append(
                     {
@@ -783,6 +811,9 @@ class ImplementationOrchestrator:
                         "round": round_index,
                         "stage": "implement_only",
                         "implementation_summary": implementation.summary,
+                        "files_committed": sorted(
+                            self._implementer.last_committed_paths
+                        ),
                     }
                 )
                 return _SubtaskOutcome(

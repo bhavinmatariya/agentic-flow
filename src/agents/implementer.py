@@ -694,27 +694,26 @@ class ImplementerAgent(BaseAgent):
                     f"committed this session: {uncommitted}. Call edit_file for each."
                 )
 
-        if require_fresh_commits and not self._committed_paths and not strict_commits:
-            if not claimed or not self.files_exist_on_branch(repo, branch, claimed):
-                raise AgentError(
-                    f"Subtask {subtask.name if subtask else 'work'} requires at least "
-                    "one successful edit_file commit this session."
-                )
+        if require_fresh_commits and not self._committed_paths:
+            raise AgentError(
+                f"Subtask {subtask.name if subtask else 'work'} requires at least "
+                "one successful edit_file commit this session. Listing files that "
+                "already exist on the branch without calling edit_file is not allowed."
+            )
+
+        if (
+            claimed
+            and not self._committed_paths
+            and strict_commits
+        ):
+            raise AgentError(
+                "files_changed lists path(s) but no successful edit_file commit was "
+                f"made this session: {claimed}. Call edit_file for each required change."
+            )
 
         require_commit_for_findings = bool(review_findings) and not _is_reviewer_infra_retry(
             attempt_failure_note
         ) and not _findings_indicate_phantom_implement(review_findings)
-        if (
-            require_commit_for_findings
-            and not self._committed_paths
-            and not strict_commits
-            and baseline_implementation is not None
-            and self._baseline_files_on_branch(baseline_implementation)
-        ):
-            self._logger.info(
-                "Skipping edit_file requirement; prior round commits exist on branch."
-            )
-            require_commit_for_findings = False
 
         if require_commit_for_findings and not self._committed_paths:
             raise AgentError(
