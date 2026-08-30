@@ -38,7 +38,7 @@ class CodeEditTool:
         self._logger = logger or get_logger(__name__)
 
     def start_branch(self, repo: str, issue_number: int) -> str:
-        """Create or reuse ``agent/fix-issue-{issue_number}`` off ``main``.
+        """Create or reuse ``agent/fix-issue-{issue_number}`` off the default branch.
 
         Args:
             repo: GitHub slug in ``owner/repository`` form (used for logging
@@ -60,8 +60,9 @@ class CodeEditTool:
             repo,
         )
         try:
-            self._adapter.create_branch(branch_name, from_ref="main")
-            self._logger.info("Created branch %r", branch_name)
+            default_branch = self._adapter.get_default_branch()
+            self._adapter.create_branch(branch_name, from_ref=default_branch)
+            self._logger.info("Created branch %r from %r", branch_name, default_branch)
         except AdapterError as exc:
             if not _is_existing_branch_error(exc):
                 raise ToolError(

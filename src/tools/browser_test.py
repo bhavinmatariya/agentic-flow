@@ -12,12 +12,12 @@ import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from core.exceptions import ToolError
 from utils.logger import get_logger
 
-_BROWSER_LAUNCH_MARKERS: tuple[str, ...] = (
+_Browser_LAUNCH_MARKERS: tuple[str, ...] = (
     "browserType.launch",
     "Executable doesn't exist",
     "Failed to launch",
@@ -27,12 +27,19 @@ _BROWSER_LAUNCH_MARKERS: tuple[str, ...] = (
     "cannot find Chromium",
 )
 
+SKIPPED_AUTH_UI_VERIFICATION: Final[dict[str, Any]] = {
+    "ui_passed": None,
+    "skipped": True,
+    "details": "skipped: could not establish authenticated session",
+}
+
 _EXAMPLE_SCRIPT = '''\
 """Example Playwright script for :meth:`BrowserTestTool.run_playwright_check`.
 
 The reviewer agent should emit a complete script like this. The script must
 print a single JSON object to stdout with at least ``passed``, ``details``, and
-``test_marker`` keys.
+``test_marker`` keys. When TEST_USER_EMAIL/TEST_USER_PASSWORD env vars are set,
+log in before exercising the changed page.
 """
 
 import json
@@ -41,7 +48,36 @@ import sys
 from playwright.sync_api import sync_playwright
 
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:3000")
+TEST_USER_EMAIL = os.environ.get("TEST_USER_EMAIL", "")
+TEST_USER_PASSWORD = os.environ.get("TEST_USER_PASSWORD", "")
 TEST_MARKER = "AGENT_TEST_unique-value-here"
+
+
+def _maybe_login(page) -> None:
+    if not TEST_USER_EMAIL or not TEST_USER_PASSWORD:
+        return
+    for email_selector in ('input[name="email"]', 'input[type="email"]', "#email"):
+        if page.locator(email_selector).count():
+            page.fill(email_selector, TEST_USER_EMAIL)
+            break
+    for password_selector in (
+        'input[name="password"]',
+        'input[type="password"]',
+        "#password",
+    ):
+        if page.locator(password_selector).count():
+            page.fill(password_selector, TEST_USER_PASSWORD)
+            break
+    for submit_selector in (
+        'button[type="submit"]',
+        'input[type="submit"]',
+        'button:has-text("Log in")',
+        'button:has-text("Sign in")',
+    ):
+        if page.locator(submit_selector).count():
+            page.click(submit_selector)
+            page.wait_for_timeout(1500)
+            break
 
 
 def main() -> None:
@@ -52,11 +88,12 @@ def main() -> None:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
             page.goto(BASE_URL, wait_until="networkidle")
+            _maybe_login(page)
             page.fill('input[name="email"]', f"{TEST_MARKER}@example.com")
             page.click('button[type="submit"]')
             page.wait_for_timeout(1000)
             passed = TEST_MARKER in page.content()
-            details.append("Submitted form and searched page content for marker")
+            details.append("Logged in when credentials provided, then verified marker")
             browser.close()
     except Exception as exc:
         details.append(str(exc))
@@ -76,6 +113,46 @@ class ScriptExecutionError(ToolError):
     """Generated verification script crashed unexpectedly before a clean result."""
 
 
+def playwright_script_guidance(
+    *,
+    base_url: str,
+    test_email: str | None = None,
+    test_password: str | None = None,
+) -> str:
+    """Return instructions for generating an ephemeral Playwright verification script."""
+    lines = [
+        "Generate a one-off Playwright Python script for live UI verification.",
+        f"Base URL: {base_url}",
+        "The script must print ONE JSON object to stdout with keys: "
+        "passed (bool), details (str), test_marker (str).",
+        "Use a unique TEST_MARKER prefixed with AGENT_TEST_.",
+    ]
+    if test_email and test_password:
+        lines.extend(
+            [
+                "",
+                "Authenticated session — REQUIRED:",
+                f"- TEST_USER_EMAIL is available via os.environ (value: {test_email!r}).",
+                f"- TEST_USER_PASSWORD is available via os.environ (do not hardcode secrets).",
+                "- If the page under test requires authentication, log in FIRST using "
+                "these test credentials, then navigate to the actual changed "
+                "page/behavior under test.",
+                "- Do NOT stop at the login screen or treat an unauthenticated redirect "
+                "as a successful verification of the changed feature.",
+                "- After login, exercise the specific user flow from the issue/fix and "
+                "include the TEST_MARKER in the data you submit or verify.",
+            ]
+        )
+    else:
+        lines.append(
+            "No test credentials were seeded; only use public/unauthenticated flows."
+        )
+    lines.append("")
+    lines.append("Reference pattern:")
+    lines.append(BrowserTestTool.example_script())
+    return "\n".join(lines)
+
+
 class BrowserTestTool:
     """Execute dynamically generated Playwright scripts against a running app."""
 
@@ -83,7 +160,14 @@ class BrowserTestTool:
         """Create the tool with optional logging."""
         self._logger = logger or get_logger(__name__)
 
-    def run_playwright_check(self, script_code: str, base_url: str) -> dict[str, Any]:
+    def run_playwright_check(
+        self,
+        script_code: str,
+        base_url: str,
+        *,
+        test_email: str | None = None,
+        test_password: str | None = None,
+    ) -> dict[str, Any]:
         """Run ``script_code`` and parse the JSON object it prints to stdout.
 
         Prerequisites:
@@ -92,6 +176,8 @@ class BrowserTestTool:
         Args:
             script_code: Complete Python Playwright script source code.
             base_url: Base URL of the running frontend under test.
+            test_email: Optional disposable test user email for authenticated flows.
+            test_password: Optional disposable test user password.
 
         Returns:
             Parsed JSON result dict from the script stdout. Expected keys include
@@ -116,6 +202,10 @@ class BrowserTestTool:
 
             env = os.environ.copy()
             env["BASE_URL"] = base_url
+            if test_email:
+                env["TEST_USER_EMAIL"] = test_email
+            if test_password:
+                env["TEST_USER_PASSWORD"] = test_password
             completed = subprocess.run(
                 [sys.executable, str(temp_path)],
                 capture_output=True,

@@ -235,6 +235,8 @@ class ReviewResult(BaseModel):
             Set to ``false`` only when the reviewer sees no viable path forward.
         layers_detected: Which change layers were detected in the diff
             (for example frontend, database, backend flags).
+        layers_checked: Which layers had automated checks actually executed.
+        test_output_summary: Human-readable summary of tested vs skipped checks.
         ui_verification: Playwright live UI check result when the full-stack
             tier ran; ``None`` when live UI verification did not apply.
         db_verification: Independent database row check when the full-stack
@@ -248,5 +250,7 @@ class ReviewResult(BaseModel):
     findings: list[str] = Field(default_factory=list)
     making_progress: bool = True
     layers_detected: dict[str, bool] = Field(default_factory=dict)
+    layers_checked: dict[str, bool] = Field(default_factory=dict)
+    test_output_summary: str = ""
     ui_verification: dict[str, Any] | None = None
     db_verification: dict[str, Any] | None = None

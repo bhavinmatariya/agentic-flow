@@ -183,6 +183,7 @@ class ImplementationOrchestrator:
                     "implementation_summary": implementation.summary,
                     "review_summary": review.summary,
                     "findings": list(review.findings),
+                    "test_output_summary": review.test_output_summary,
                 }
             )
 
@@ -250,6 +251,7 @@ class ImplementationOrchestrator:
             approach=approach,
             history=history,
             reason=f"Review did not approve after {self._max_rounds} round(s).",
+            last_review=last_review,
         )
         self._mark_needs_human(issue_number, diagnostic)
         return OrchestratorResult(
@@ -313,8 +315,8 @@ class ImplementationOrchestrator:
             f"{files_block}\n\n"
             "## Testing\n\n"
             f"**Layers checked:** {layers_checked}\n\n"
+            f"**Automated checks:** {test_output_summary}\n\n"
             f"**Review summary:** {review_result.summary}\n\n"
-            f"**Test output summary:** {test_output_summary}\n\n"
             f"{ui_section}\n\n"
             f"{db_section}\n\n"
             "## Open questions for humans\n\n"
@@ -339,6 +341,7 @@ class ImplementationOrchestrator:
         approach: Approach,
         history: list[dict[str, Any]],
         reason: str,
+        last_review: ReviewResult | None = None,
     ) -> str:
         """Format a GitHub comment when orchestration stalls."""
         lines = [
@@ -348,9 +351,20 @@ class ImplementationOrchestrator:
             f"Approved approach: **{approach.name}**",
             "",
             f"**Why it stopped:** {reason}",
+        ]
+        if last_review is not None and last_review.test_output_summary.strip():
+            lines.extend(
+                [
+                    "",
+                    f"**Automated checks:** {last_review.test_output_summary}",
+                ]
+            )
+        lines.extend(
+            [
             "",
             "### Attempts",
-        ]
+            ]
+        )
         if not history:
             lines.append("- No rounds completed.")
         else:
@@ -412,18 +426,18 @@ def _short_error(exc: BaseException) -> str:
 
 
 def _layers_checked_summary(review_result: ReviewResult) -> str:
-    layers = getattr(review_result, "layers_checked", None) or review_result.layers_detected
+    layers = review_result.layers_checked or review_result.layers_detected
     if not layers:
         return "No layer flags recorded."
-    return ", ".join(
-        f"{name}={'yes' if bool(value) else 'no'}" for name, value in sorted(layers.items())
-    )
+    run_layers = [name for name, value in sorted(layers.items()) if value]
+    if not run_layers:
+        return "none (no automated checks ran for this change)"
+    return ", ".join(run_layers)
 
 
 def _test_output_summary(review_result: ReviewResult) -> str:
-    explicit = getattr(review_result, "test_output_summary", None)
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
+    if review_result.test_output_summary.strip():
+        return review_result.test_output_summary.strip()
     parts = [review_result.summary]
     if review_result.findings:
         parts.append("Findings: " + "; ".join(review_result.findings))

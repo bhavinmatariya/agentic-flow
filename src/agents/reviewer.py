@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -18,42 +19,16 @@ from tools.browser_test import (
     BrowserLaunchError,
     BrowserTestTool,
     ScriptExecutionError,
+    SKIPPED_AUTH_UI_VERIFICATION,
     extract_test_marker,
 )
 from tools.code_search import CodeSearchTool
 from tools.db_verifier import DBVerifierTool
 from tools.environment_manager import EnvironmentManager, checkout_git_branch
-from tools.test_runner import AutomatedCheckResult, run_automated_checks
-
-_FRONTEND_MARKERS: Final[tuple[str, ...]] = (
-    "frontend/",
-    "client/",
-    "web/",
-    "ui/",
-    "src/components/",
-    "pages/",
-    "app/",
-)
-_FRONTEND_EXTENSIONS: Final[tuple[str, ...]] = (
-    ".tsx",
-    ".jsx",
-    ".vue",
-    ".html",
-    ".css",
-    ".scss",
-)
-_DB_MARKERS: Final[tuple[str, ...]] = (
-    "migration",
-    "migrations/",
-    "alembic/",
-    "schema.sql",
-    "models.py",
-    "model.py",
-    "database/",
-    "db/",
-    "prisma/",
-    "sequelize/",
-    ".sql",
+from tools.test_runner import (
+    AutomatedCheckResult,
+    detect_change_layers,
+    run_automated_checks,
 )
 _LIVE_VERIFICATION_TOOLS: Final[frozenset[str]] = frozenset(
     {
@@ -62,6 +37,7 @@ _LIVE_VERIFICATION_TOOLS: Final[frozenset[str]] = frozenset(
         "run_migrations",
         "generate_dummy_env",
         "start_process",
+        "seed_test_user",
         "stop_process",
         "stop_test_database",
         "run_playwright_check",
@@ -85,10 +61,14 @@ REVIEWER_SYSTEM_PROMPT: Final[str] = (
     "database (e.g. a form submission), after the standard backend/frontend "
     "checks pass, do a full live verification: call detect_stack, "
     "start_test_database, run_migrations, start the backend and frontend "
-    "with dummy env vars via start_process, then write a one-off Playwright "
-    "script that exercises the specific flow using a clearly unique test "
-    "marker value (e.g. a random string prefixed 'AGENT_TEST_'), run it with "
-    "run_playwright_check, then use query() to independently verify the "
+    "with dummy env vars via start_process, then call seed_test_user to create "
+    "a disposable test account. Use the returned credentials and "
+    "playwright_guidance when writing a one-off Playwright script that exercises "
+    "the specific flow using a clearly unique test marker value (e.g. a random "
+    "string prefixed 'AGENT_TEST_'). If seed_test_user returns skipped=true, set "
+    "ui_verification to ui_verification_if_skipped from the tool result and do "
+    "NOT fail the review solely because authenticated UI verification could not "
+    "run. Otherwise run the script with run_playwright_check, then use query() "
     "correct row was stored with correct data — report these as two SEPARATE "
     "results (ui_passed, db_passed), not one combined guess. A successful "
     "query that returns zero rows or wrong field values is a REAL code "
@@ -141,6 +121,9 @@ class _LiveVerificationState:
     db_type: str | None = None
     test_row_created: bool = False
     script_retry_used: bool = False
+    test_user_email: str | None = None
+    test_user_password: str | None = None
+    auth_session_skipped: bool = False
 
 
 class ReviewerAgent(BaseAgent):
@@ -192,7 +175,10 @@ class ReviewerAgent(BaseAgent):
             logger=self._logger,
         )
         layers = detect_change_layers(implementation.files_changed)
-        automated_checks = run_automated_checks(local_repo_path)
+        automated_checks = run_automated_checks(
+            local_repo_path,
+            implementation.files_changed,
+        )
         default_effort = self._settings.agent_config("reviewer").effort
         self._review_context = {
             "issue": issue,
@@ -223,6 +209,7 @@ class ReviewerAgent(BaseAgent):
         )
         try:
             review = self.run(user_message, ReviewResult)
+            review = _normalize_skipped_ui_verification(review)
             return _merge_automated_checks(review, automated_checks)
         except EnvironmentSetupError as exc:
             self._logger.warning(
@@ -361,6 +348,7 @@ class ReviewerAgent(BaseAgent):
             automated_checks=context.get("automated_checks"),
         )
         review = self.run(fallback_message, ReviewResult)
+        review = _normalize_skipped_ui_verification(review)
         automated = context.get("automated_checks")
         if isinstance(automated, AutomatedCheckResult):
             return _merge_automated_checks(review, automated)
@@ -466,6 +454,24 @@ class ReviewerAgent(BaseAgent):
                 self._process_handles[process.pid] = process
                 return json.dumps({"pid": process.pid, "ready": True}, ensure_ascii=False)
 
+            if tool_name == "seed_test_user":
+                result = self._environment.seed_test_user(
+                    _require_str(tool_input, "local_repo_path"),
+                    frontend_url=_require_str(tool_input, "frontend_url"),
+                    backend_url=_optional_str(tool_input, "backend_url"),
+                    connection_string=_require_str(tool_input, "connection_string"),
+                    db_type=_require_str(tool_input, "db_type"),
+                )
+                if self._live_state is not None:
+                    if result.get("skipped"):
+                        self._live_state.auth_session_skipped = True
+                    elif result.get("seeded"):
+                        self._live_state.test_user_email = str(result.get("email") or "")
+                        self._live_state.test_user_password = str(
+                            result.get("password") or ""
+                        )
+                return json.dumps(result, ensure_ascii=False)
+
             if tool_name == "stop_process":
                 pid = int(tool_input.get("pid"))
                 handle = self._process_handles.pop(pid, None)
@@ -536,8 +542,18 @@ class ReviewerAgent(BaseAgent):
         api_fallback_url: str | None,
     ) -> dict[str, Any]:
         marker = extract_test_marker(script_code)
+        test_email = None
+        test_password = None
+        if self._live_state is not None and not self._live_state.auth_session_skipped:
+            test_email = self._live_state.test_user_email
+            test_password = self._live_state.test_user_password
         try:
-            result = self._browser_test.run_playwright_check(script_code, base_url)
+            result = self._browser_test.run_playwright_check(
+                script_code,
+                base_url,
+                test_email=test_email,
+                test_password=test_password,
+            )
             if marker and self._live_state is not None:
                 self._live_state.marker_value = marker
             return result
@@ -575,9 +591,8 @@ class ReviewerAgent(BaseAgent):
         timeout_seconds: int,
     ) -> dict[str, Any]:
         completed = subprocess.run(
-            command,
+            shlex.split(command),
             cwd=local_repo_path,
-            shell=True,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
@@ -628,49 +643,112 @@ class ReviewerAgent(BaseAgent):
         self._active_connection_string = None
 
 
+def _normalize_skipped_ui_verification(review: ReviewResult) -> ReviewResult:
+    """Treat skipped authenticated UI verification as non-failing, like skipped test layers."""
+    ui = review.ui_verification
+    if not isinstance(ui, dict):
+        return review
+    if not ui.get("skipped"):
+        return review
+
+    details = str(
+        ui.get("details") or SKIPPED_AUTH_UI_VERIFICATION["details"]
+    ).strip()
+    normalized_ui = {
+        **ui,
+        "ui_passed": None,
+        "skipped": True,
+        "details": details,
+    }
+    findings = [
+        item
+        for item in review.findings
+        if "could not establish authenticated session" not in item.lower()
+        and "login screen" not in item.lower()
+    ]
+    return review.model_copy(
+        update={
+            "ui_verification": normalized_ui,
+            "findings": findings,
+        }
+    )
+
+
+def _automated_finding_layer(finding: str) -> str | None:
+    """Map an automated finding string to backend or frontend layer."""
+    lower = finding.lower()
+    if lower.startswith("pytest"):
+        return "backend"
+    if lower.startswith(("build failed", "test failed", "typecheck failed", "frontend check")):
+        return "frontend"
+    return None
+
+
+def _relevant_automated_findings(
+    automated: AutomatedCheckResult,
+) -> list[str]:
+    """Return findings that belong to layers where checks actually ran."""
+    relevant: list[str] = []
+    for finding in automated.findings:
+        layer = _automated_finding_layer(finding)
+        if layer is None or automated.layers_run.get(layer, False):
+            relevant.append(finding)
+    return relevant
+
+
+def _build_test_output_summary(automated: AutomatedCheckResult) -> str:
+    """Build a human-readable summary of what was tested vs skipped."""
+    tested_parts: list[str] = []
+    if automated.layers_run.get("backend"):
+        tested_parts.append("backend pytest")
+    if automated.layers_run.get("frontend"):
+        tested_parts.append("frontend build/tests")
+
+    if tested_parts:
+        tested_label = ", ".join(tested_parts)
+    elif not automated.layers_relevant.get("backend") and not automated.layers_relevant.get(
+        "frontend"
+    ):
+        tested_label = "none (docs-only or non-code change)"
+    else:
+        tested_label = "none"
+
+    skipped_label = (
+        "; ".join(automated.skipped) if automated.skipped else "none"
+    )
+    return f"Tested: {tested_label}. Skipped: {skipped_label}."
+
+
 def _merge_automated_checks(
     review: ReviewResult,
     automated: AutomatedCheckResult,
 ) -> ReviewResult:
-    """Fold deterministic test/build failures into the model's review result."""
+    """Fold deterministic test/build failures from run layers into the review."""
+    relevant_findings = _relevant_automated_findings(automated)
     findings = list(review.findings)
-    for item in automated.findings:
+    for item in relevant_findings:
         if item not in findings:
             findings.append(item)
 
-    approved = review.approved and not automated.findings
+    approved = review.approved and not relevant_findings
+    test_output_summary = _build_test_output_summary(automated)
     summary = review.summary
-    if automated.skipped:
-        skipped_note = "; ".join(automated.skipped)
-        summary = f"{summary.rstrip()} ({skipped_note})"
+    if relevant_findings:
+        summary = (
+            f"{summary.rstrip()} Automated checks failed for layers that were run."
+        )
+    elif automated.skipped:
+        summary = f"{summary.rstrip()} ({test_output_summary})"
 
     return review.model_copy(
         update={
             "approved": approved,
             "findings": findings,
             "summary": summary,
+            "layers_checked": dict(automated.layers_run),
+            "test_output_summary": test_output_summary,
         }
     )
-
-
-def detect_change_layers(files_changed: list[str]) -> dict[str, bool]:
-    """Detect whether a diff touches frontend, database, or backend layers."""
-    frontend = False
-    database = False
-    backend = False
-    for raw_path in files_changed:
-        path = raw_path.replace("\\", "/").lower()
-        if any(marker in path for marker in _FRONTEND_MARKERS) or path.endswith(
-            _FRONTEND_EXTENSIONS
-        ):
-            frontend = True
-        if any(marker in path for marker in _DB_MARKERS):
-            database = True
-        if path.endswith((".py", ".go", ".rs", ".java")) and not database:
-            backend = True
-        if any(marker in path for marker in ("api/", "server/", "backend/", "routes/")):
-            backend = True
-    return {"frontend": frontend, "database": database, "backend": backend}
 
 
 def _build_tool_definitions(*, include_live: bool = True) -> list[dict[str, Any]]:
@@ -800,6 +878,40 @@ def _build_tool_definitions(*, include_live: bool = True) -> list[dict[str, Any]
                         "timeout": {"type": "integer"},
                     },
                     "required": ["command", "cwd", "env", "ready_url"],
+                },
+            },
+            {
+                "name": "seed_test_user",
+                "description": (
+                    "After backend and frontend are running, create a disposable test "
+                    "user (signup endpoint preferred, DB insert fallback). Returns "
+                    "credentials, frontend_url, and playwright_guidance for the "
+                    "ephemeral Playwright script."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "local_repo_path": local_repo_path_schema,
+                        "frontend_url": {
+                            "type": "string",
+                            "description": "Running frontend base URL.",
+                        },
+                        "backend_url": {
+                            "type": "string",
+                            "description": "Optional backend base URL for signup API calls.",
+                        },
+                        "connection_string": {
+                            "type": "string",
+                            "description": "Disposable test database connection string.",
+                        },
+                        "db_type": {"type": "string"},
+                    },
+                    "required": [
+                        "local_repo_path",
+                        "frontend_url",
+                        "connection_string",
+                        "db_type",
+                    ],
                 },
             },
             {

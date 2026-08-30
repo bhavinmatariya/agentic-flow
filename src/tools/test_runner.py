@@ -1,6 +1,6 @@
 """Automated backend/frontend checks for the reviewer pipeline.
 
-Detects pytest and npm/tsc tooling in a checkout, runs what is configured,
+Runs pytest and npm/tsc tooling only for layers touched by ``files_changed``,
 and returns human-readable findings instead of raising on test/build failures.
 """
 
@@ -16,13 +16,35 @@ from typing import Any, Final
 
 from utils.logger import get_logger
 
-_FRONTEND_DIR_NAMES: Final[tuple[str, ...]] = (
-    "",
-    "frontend",
-    "client",
-    "web",
-    "ui",
-    "app",
+_FRONTEND_MARKERS: Final[tuple[str, ...]] = (
+    "frontend/",
+    "client/",
+    "web/",
+    "ui/",
+    "src/components/",
+    "pages/",
+    "app/",
+)
+_FRONTEND_EXTENSIONS: Final[tuple[str, ...]] = (
+    ".tsx",
+    ".jsx",
+    ".vue",
+    ".html",
+    ".css",
+    ".scss",
+)
+_DB_MARKERS: Final[tuple[str, ...]] = (
+    "migration",
+    "migrations/",
+    "alembic/",
+    "schema.sql",
+    "models.py",
+    "model.py",
+    "database/",
+    "db/",
+    "prisma/",
+    "sequelize/",
+    ".sql",
 )
 _OUTPUT_TAIL_CHARS: Final[int] = 4000
 _KEY_ERROR_LINES: Final[int] = 12
@@ -36,64 +58,99 @@ class AutomatedCheckResult:
 
     findings: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
-    layers: dict[str, bool] = field(default_factory=dict)
+    layers_relevant: dict[str, bool] = field(default_factory=dict)
+    layers_run: dict[str, bool] = field(default_factory=dict)
 
 
-def detect_layers(local_repo_path: str) -> dict[str, Any]:
-    """Detect whether backend (pytest) and frontend (npm/tsc) checks can run."""
+def detect_change_layers(files_changed: list[str]) -> dict[str, bool]:
+    """Detect whether ``files_changed`` touches frontend, database, or backend layers."""
+    frontend = False
+    database = False
+    backend = False
+    for raw_path in files_changed:
+        path = raw_path.replace("\\", "/").lower()
+        if any(marker in path for marker in _FRONTEND_MARKERS) or path.endswith(
+            _FRONTEND_EXTENSIONS
+        ):
+            frontend = True
+        if any(marker in path for marker in _DB_MARKERS):
+            database = True
+        if path.endswith((".py", ".go", ".rs", ".java")):
+            backend = True
+        if any(marker in path for marker in ("api/", "server/", "backend/", "routes/")):
+            backend = True
+    return {"frontend": frontend, "database": database, "backend": backend}
+
+
+def run_automated_checks(
+    local_repo_path: str,
+    files_changed: list[str],
+) -> AutomatedCheckResult:
+    """Run automated checks scoped to layers touched by ``files_changed``.
+
+    Never raises on test/build failures; returns findings instead.
+    """
     root = Path(local_repo_path).expanduser().resolve()
-    backend = _has_pytest_setup(root)
-    frontend_dirs = _find_frontend_package_dirs(root)
-    return {
-        "backend": backend,
-        "frontend": bool(frontend_dirs),
-        "frontend_package_dirs": [str(path) for path in frontend_dirs],
-    }
-
-
-def run_automated_checks(local_repo_path: str) -> AutomatedCheckResult:
-    """Run configured automated checks and return findings (never raises on failure)."""
-    root = Path(local_repo_path).expanduser().resolve()
-    if not root.is_dir():
-        return AutomatedCheckResult(
-            findings=[f"Automated checks skipped: checkout path missing: {root}"],
-            layers={"backend": False, "frontend": False},
-        )
-
-    detection = detect_layers(str(root))
+    layers_relevant = detect_change_layers(files_changed)
+    layers_run = {"backend": False, "frontend": False}
     findings: list[str] = []
     skipped: list[str] = []
 
-    if detection["backend"]:
-        pytest_finding = _run_pytest(root)
-        if pytest_finding:
-            findings.append(pytest_finding)
-    else:
-        skipped.append("backend: skipped: no tests configured")
+    if not root.is_dir():
+        return AutomatedCheckResult(
+            findings=[f"Automated checks skipped: checkout path missing: {root}"],
+            skipped=[
+                "backend: skipped: checkout path missing",
+                "frontend: skipped: checkout path missing",
+            ],
+            layers_relevant=layers_relevant,
+            layers_run=layers_run,
+        )
 
-    if detection["frontend"]:
-        for package_dir in detection["frontend_package_dirs"]:
-            package_path = Path(package_dir)
-            layer_findings, layer_skipped = _run_frontend_checks(package_path)
-            findings.extend(layer_findings)
-            skipped.extend(layer_skipped)
+    if not files_changed:
+        skipped.append("backend: skipped: no files changed")
+        skipped.append("frontend: skipped: no relevant files changed")
+    elif layers_relevant["backend"]:
+        if _has_pytest_setup(root):
+            layers_run["backend"] = True
+            pytest_finding = _run_pytest(root)
+            if pytest_finding:
+                findings.append(pytest_finding)
+        else:
+            skipped.append("backend: skipped: no tests configured")
     else:
-        skipped.append("frontend: skipped: no tests configured")
+        skipped.append("backend: skipped: no relevant files changed")
+
+    if files_changed and layers_relevant["frontend"]:
+        package_dirs = _frontend_package_dirs_for_changed_files(root, files_changed)
+        if not package_dirs:
+            skipped.append(
+                "frontend: skipped: no frontend package directory for changed files"
+            )
+        else:
+            layers_run["frontend"] = True
+            for package_dir in package_dirs:
+                layer_findings, layer_skipped = _run_frontend_checks(package_dir)
+                findings.extend(layer_findings)
+                skipped.extend(layer_skipped)
+    elif files_changed:
+        skipped.append("frontend: skipped: no relevant files changed")
 
     logger.info(
-        "Automated checks in %s: findings=%d skipped=%d layers=%s",
+        "Automated checks in %s: files_changed=%d findings=%d skipped=%d "
+        "layers_relevant=%s layers_run=%s",
         root,
+        len(files_changed),
         len(findings),
         len(skipped),
-        detection,
+        layers_relevant,
+        layers_run,
     )
     return AutomatedCheckResult(
         findings=findings,
         skipped=skipped,
-        layers={
-            "backend": bool(detection["backend"]),
-            "frontend": bool(detection["frontend"]),
-        },
+        layers_relevant=layers_relevant,
+        layers_run=layers_run,
     )
 
 
@@ -136,15 +193,35 @@ def _tests_directory_has_files(path: Path) -> bool:
     return False
 
 
-def _find_frontend_package_dirs(root: Path) -> list[Path]:
-    dirs: list[Path] = []
+def _frontend_package_dirs_for_changed_files(
+    root: Path,
+    files_changed: list[str],
+) -> list[Path]:
+    """Return package.json roots that contain at least one changed file."""
+    root = root.resolve()
     seen: set[Path] = set()
-    for name in _FRONTEND_DIR_NAMES:
-        candidate = (root / name).resolve() if name else root
-        package_json = candidate / "package.json"
-        if package_json.is_file() and candidate not in seen:
-            dirs.append(candidate)
-            seen.add(candidate)
+    dirs: list[Path] = []
+    for raw_path in files_changed:
+        normalized = raw_path.replace("\\", "/").lstrip("/")
+        if not normalized:
+            continue
+        candidate_path = root / normalized
+        current = candidate_path.parent if normalized else root
+        while True:
+            try:
+                current.relative_to(root)
+            except ValueError:
+                break
+            package_json = current / "package.json"
+            if package_json.is_file():
+                resolved = current.resolve()
+                if resolved not in seen:
+                    dirs.append(resolved)
+                    seen.add(resolved)
+                break
+            if current == root:
+                break
+            current = current.parent
     return dirs
 
 
@@ -174,13 +251,15 @@ def _run_frontend_checks(package_dir: Path) -> tuple[list[str], list[str]]:
     findings: list[str] = []
     skipped: list[str] = []
 
-    checks: list[tuple[str, str]] = []
+    checks: list[tuple[list[str], str]] = []
     if isinstance(scripts.get("build"), str) and scripts["build"].strip():
-        checks.append(("npm run build", "Build failed"))
+        checks.append((["npm", "run", "build"], "Build failed"))
     if isinstance(scripts.get("test"), str) and scripts["test"].strip():
-        checks.append(("npm test --if-present", "Test failed"))
+        checks.append((["npm", "test", "--if-present"], "Test failed"))
     if not checks and (package_dir / "tsconfig.json").is_file():
-        checks.append(("npx tsc --noEmit", "Typecheck failed"))
+        npx = shutil.which("npx")
+        if npx:
+            checks.append(([npx, "tsc", "--noEmit"], "Typecheck failed"))
 
     if not checks:
         skipped.append(f"{rel}: skipped: no tests configured")
@@ -191,10 +270,14 @@ def _run_frontend_checks(package_dir: Path) -> tuple[list[str], list[str]]:
         skipped.append(f"{rel}: skipped: npm is not available in this environment")
         return findings, skipped
 
-    for command, prefix in checks:
-        completed = _run_subprocess(command, cwd=package_dir, label=command, shell=True)
+    for argv, prefix in checks:
+        if argv[0] == "npm":
+            command = [npm, *argv[1:]]
+        else:
+            command = argv
+        completed = _run_subprocess(command, cwd=package_dir, label=" ".join(command))
         if completed is None:
-            skipped.append(f"{rel}: skipped: could not run {command!r}")
+            skipped.append(f"{rel}: skipped: could not run {' '.join(command)!r}")
             continue
         if completed.returncode == 0:
             continue
@@ -205,18 +288,16 @@ def _run_frontend_checks(package_dir: Path) -> tuple[list[str], list[str]]:
 
 
 def _run_subprocess(
-    command: str | list[str],
+    command: list[str],
     *,
     cwd: Path,
     label: str,
-    shell: bool = False,
     timeout_seconds: int = 600,
 ) -> subprocess.CompletedProcess[str] | None:
     try:
         return subprocess.run(
             command,
             cwd=str(cwd),
-            shell=shell,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
@@ -229,7 +310,7 @@ def _run_subprocess(
         output = _combined_output(exc)
         logger.warning("Automated check %r timed out after %ss", label, timeout_seconds)
         return subprocess.CompletedProcess(
-            args=command if isinstance(command, list) else [command],
+            args=command,
             returncode=124,
             stdout=output,
             stderr="",

@@ -203,6 +203,14 @@ class GitHubAdapter(IssueProviderAdapter):
         self._wrap(f"create_branch({branch_name!r}, from_ref={from_ref!r})", _create)
         logger.info("Created branch %r from %r", branch_name, from_ref)
 
+    def get_default_branch(self) -> str:
+        """Return the repository default branch from the GitHub API."""
+        default_branch = str(self._repo.default_branch or "main").strip()
+        if not default_branch:
+            default_branch = "main"
+        logger.debug("Default branch for %s is %r", self._settings.github_repo, default_branch)
+        return default_branch
+
     def get_file_content(self, repo_full_name: str, path: str, ref: str) -> str:
         """Fetch a file's current live content from GitHub at ``ref``."""
         normalized_path = path.replace("\\", "/").lstrip("/")

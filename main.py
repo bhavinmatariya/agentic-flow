@@ -32,7 +32,7 @@ from agents.response_parser import ResponseParserAgent
 from agents.reviewer import ReviewerAgent
 from config import ConfigurationError, Settings
 from core.exceptions import AgentError
-from core.models import Approach, Investigation, ParsedIntent
+from core.models import Approach, Investigation, ParsedIntent, Proposal
 from core.orchestrator import (
     DONE_LABEL,
     IN_PROGRESS_LABEL,
@@ -54,6 +54,7 @@ DEFAULT_MODEL = "claude-sonnet-5"
 AWAITING_APPROVAL_LABEL = "agent:awaiting-approval"
 PROPOSAL_COMMENT_HEADER = PROPOSAL_SECTION_HEADER
 STATE_MARKER = "agentic-flow:state"
+RESTART_INVESTIGATION_MODE = "restart_investigation"
 _STATE_COMMENT_PATTERN = re.compile(
     r"<!--\s*agentic-flow:state\s*\n(.*?)\n-->",
     re.DOTALL,
@@ -64,17 +65,35 @@ def _default_fix_branch(issue_number: int) -> str:
     return f"agent/fix-issue-{issue_number}"
 
 
+@dataclass
+class _PipelineState:
+    """Parsed investigation/proposal/approach payload from a state comment."""
+
+    branch: str
+    investigation: Investigation | None = None
+    proposal: Proposal | None = None
+    approach: Approach | None = None
+    resume_mode: str | None = None
+
+
 def _format_state_comment(
-    investigation: Investigation,
-    approach: Approach,
     branch: str,
+    *,
+    investigation: Investigation | None = None,
+    proposal: Proposal | None = None,
+    approach: Approach | None = None,
+    resume_mode: str | None = None,
 ) -> str:
-    """Build a hidden state payload comment for resume after ``needs-human``."""
-    payload = {
-        "investigation": investigation.model_dump(),
-        "approach": approach.model_dump(),
-        "branch": branch,
-    }
+    """Build a hidden state payload comment for resume or post-approval work."""
+    payload: dict[str, Any] = {"branch": branch}
+    if resume_mode is not None:
+        payload["resume_mode"] = resume_mode
+    if investigation is not None:
+        payload["investigation"] = investigation.model_dump()
+    if proposal is not None:
+        payload["proposal"] = proposal.model_dump()
+    if approach is not None:
+        payload["approach"] = approach.model_dump()
     return f"<!-- agentic-flow:state\n{json.dumps(payload, ensure_ascii=False)}\n-->"
 
 
@@ -92,8 +111,8 @@ def _find_latest_state_comment(
     return max(matches, key=lambda comment: str(comment.get("created_at", "")))
 
 
-def _parse_state_comment(body: str) -> tuple[Investigation, Approach, str]:
-    """Parse investigation, approach, and branch from a state comment body."""
+def _parse_state_comment(body: str) -> _PipelineState:
+    """Parse pipeline state from a state comment body."""
     match = _STATE_COMMENT_PATTERN.search(body)
     if match is None:
         raise AgentError(
@@ -111,29 +130,97 @@ def _parse_state_comment(body: str) -> tuple[Investigation, Approach, str]:
     if not branch:
         raise AgentError("State comment payload is missing a non-empty branch name.")
 
+    resume_mode = payload.get("resume_mode")
+    if resume_mode == RESTART_INVESTIGATION_MODE:
+        return _PipelineState(branch=branch, resume_mode=RESTART_INVESTIGATION_MODE)
+
+    investigation: Investigation | None = None
+    proposal: Proposal | None = None
+    approach: Approach | None = None
     try:
-        investigation = Investigation.model_validate(payload.get("investigation"))
-        approach = Approach.model_validate(payload.get("approach"))
+        if payload.get("investigation") is not None:
+            investigation = Investigation.model_validate(payload.get("investigation"))
+        if payload.get("proposal") is not None:
+            proposal = Proposal.model_validate(payload.get("proposal"))
+        if payload.get("approach") is not None:
+            approach = Approach.model_validate(payload.get("approach"))
     except ValidationError as exc:
         raise AgentError(f"State comment payload failed validation: {exc}") from exc
 
-    return investigation, approach, branch
+    return _PipelineState(
+        branch=branch,
+        investigation=investigation,
+        proposal=proposal,
+        approach=approach,
+        resume_mode=str(resume_mode) if resume_mode else None,
+    )
 
 
-def _post_pipeline_state(
+def _post_proposal_state(
+    adapter: GitHubAdapter,
+    issue_number: int,
+    investigation: Investigation,
+    proposal: Proposal,
+) -> None:
+    """Post hidden investigation + full proposal before waiting for human approval."""
+    branch = _default_fix_branch(issue_number)
+    adapter.post_comment(
+        issue_number,
+        _format_state_comment(
+            branch,
+            investigation=investigation,
+            proposal=proposal,
+        ),
+    )
+    logger.info(
+        "Posted proposal state for issue #%s (branch=%r, approaches=%d)",
+        issue_number,
+        branch,
+        len(proposal.approaches),
+    )
+
+
+def _post_approval_state(
     adapter: GitHubAdapter,
     issue_number: int,
     investigation: Investigation,
     approach: Approach,
+    proposal: Proposal | None = None,
 ) -> None:
-    """Post hidden investigation/approach/branch state for later resume."""
+    """Post hidden state with the human-selected approach for resume after stalls."""
     branch = _default_fix_branch(issue_number)
     adapter.post_comment(
         issue_number,
-        _format_state_comment(investigation, approach, branch),
+        _format_state_comment(
+            branch,
+            investigation=investigation,
+            proposal=proposal,
+            approach=approach,
+        ),
     )
     logger.info(
-        "Posted pipeline state for issue #%s (branch=%r)",
+        "Posted approval state for issue #%s (branch=%r, approach=%r)",
+        issue_number,
+        branch,
+        approach.name,
+    )
+
+
+def _ensure_state_comment_for_needs_human(
+    adapter: GitHubAdapter,
+    issue_number: int,
+) -> None:
+    """Ensure a resume marker exists before labeling ``agent:needs-human``."""
+    comments = adapter.list_comments(issue_number)
+    if _find_latest_state_comment(comments) is not None:
+        return
+    branch = _default_fix_branch(issue_number)
+    adapter.post_comment(
+        issue_number,
+        _format_state_comment(branch, resume_mode=RESTART_INVESTIGATION_MODE),
+    )
+    logger.info(
+        "Posted restart state marker for issue #%s (branch=%r)",
         issue_number,
         branch,
     )
@@ -208,6 +295,7 @@ def _post_unhandled_pipeline_failure(
         return
 
     try:
+        _ensure_state_comment_for_needs_human(adapter, issue_number)
         adapter.post_comment(issue_number, comment)
         if adapter.has_label(issue_number, IN_PROGRESS_LABEL):
             adapter.remove_label(issue_number, IN_PROGRESS_LABEL)
@@ -333,6 +421,7 @@ def _handle_issue_opened(
             comment_body = agents.proposer.format_as_comment(proposal, investigation)
             comment = adapter.post_comment(issue_number, comment_body)
             adapter.add_label(issue_number, AWAITING_APPROVAL_LABEL)
+            _post_proposal_state(adapter, issue_number, investigation, proposal)
             logger.info(
                 "Posted proposal on issue #%s (comment id=%s, approaches=%d)",
                 issue_number,
@@ -440,6 +529,7 @@ def _handle_issue_comment(
                     investigation,
                 )
                 comment = adapter.post_comment(issue_number, revised_comment_body)
+                _post_proposal_state(adapter, issue_number, investigation, proposal)
                 logger.info(
                     "Posted revised proposal on issue #%s (comment id=%s, "
                     "approaches=%d); %r label kept",
@@ -529,7 +619,36 @@ def _handle_resume(
             f"{STATE_MARKER!r} state comment was found to resume from."
         )
 
-    investigation, approach, branch = _parse_state_comment(str(state_comment["body"]))
+    state = _parse_state_comment(str(state_comment["body"]))
+    if state.resume_mode == RESTART_INVESTIGATION_MODE:
+        logger.info(
+            "Issue #%s resume marker requests restart; re-running investigation",
+            issue_number,
+        )
+        adapter.remove_label(issue_number, NEEDS_HUMAN_LABEL)
+        adapter.post_comment(
+            issue_number,
+            "Previous run failed before saving full progress. "
+            "Re-running investigation and posting a fresh proposal.",
+        )
+        return _handle_issue_opened(
+            adapter,
+            settings,
+            issue_number,
+            model,
+            repos_json,
+            reporter,
+        )
+
+    if state.investigation is None or state.approach is None:
+        raise AgentError(
+            f"Issue #{issue_number} state comment is missing investigation or "
+            "selected approach required to resume implementation."
+        )
+
+    investigation = state.investigation
+    approach = state.approach
+    branch = state.branch
     logger.info(
         "Resuming issue #%s from saved state on branch %r (approach=%r)",
         issue_number,
@@ -553,7 +672,13 @@ def _handle_resume(
             tmp_dir=tmp,
             repos_json=repos_json,
         )
-        _post_pipeline_state(adapter, issue_number, investigation, approach)
+        _post_approval_state(
+            adapter,
+            issue_number,
+            investigation,
+            approach,
+            state.proposal,
+        )
         with reporter.stage("RESUMING", 35):
             result = agents.orchestrator.run(
                 issue,
@@ -589,31 +714,44 @@ def _handle_approval(
     adapter.remove_label(issue_number, AWAITING_APPROVAL_LABEL)
     adapter.add_label(issue_number, IN_PROGRESS_LABEL)
 
-    selected_name = parsed.selected_approach or "the selected approach"
+    comments = adapter.list_comments(issue_number)
+    state_comment = _find_latest_state_comment(comments)
+    if state_comment is None:
+        raise AgentError(
+            f"Issue #{issue_number} has no {STATE_MARKER!r} comment; "
+            "cannot load the investigation the human approved against."
+        )
+    state = _parse_state_comment(str(state_comment["body"]))
+    if state.investigation is None or state.proposal is None:
+        raise AgentError(
+            f"Issue #{issue_number} state comment is missing investigation or proposal."
+        )
+
+    investigation = state.investigation
+    approach = resolve_approach(state.proposal.approaches, parsed.selected_approach)
+    selected_name = approach.name
+
     adapter.post_comment(
         issue_number,
         (
             f"Understood — proceeding with **{selected_name}**.\n\n"
-            "Investigating, implementing, reviewing, and opening a pull request."
+            "Implementing, reviewing, and opening a pull request."
         ),
     )
 
-    with reporter.stage("INVESTIGATING", 25):
-        investigation = agents.investigator.investigate(
-            issue["title"],
-            issue["body"],
-            settings.github_repo,
-        )
-    with reporter.stage("PROPOSING", 40):
-        proposal = agents.proposer.propose(investigation)
-        approach = resolve_approach(proposal.approaches, parsed.selected_approach)
-        logger.info(
-            "Running orchestrator for issue #%s with approach %r",
-            issue_number,
-            approach.name,
-        )
+    logger.info(
+        "Running orchestrator for issue #%s with approved approach %r",
+        issue_number,
+        approach.name,
+    )
 
-    _post_pipeline_state(adapter, issue_number, investigation, approach)
+    _post_approval_state(
+        adapter,
+        issue_number,
+        investigation,
+        approach,
+        state.proposal,
+    )
 
     result = agents.orchestrator.run(
         issue,

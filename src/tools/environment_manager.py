@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -14,6 +15,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -72,6 +74,38 @@ _DEFAULT_READY_TIMEOUT: Final[int] = 90
 _DOCKER_WAIT_SECONDS: Final[int] = 60
 _MIN_DB_SCORE: Final[int] = 2
 _MIN_CONFIDENCE_RATIO: Final[float] = 1.5
+DEFAULT_TEST_USER_EMAIL: Final[str] = "agentic-flow-test@example.com"
+_COMMON_SIGNUP_PATHS: Final[tuple[str, ...]] = (
+    "/api/auth/register",
+    "/api/register",
+    "/api/signup",
+    "/api/users",
+    "/auth/register",
+    "/register",
+    "/signup",
+)
+_SIGNUP_ROUTE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"""['"](/[^'"]*(?:register|signup)[^'"]*)['"]""",
+    re.IGNORECASE,
+)
+_USER_TABLE_CANDIDATES: Final[tuple[str, ...]] = (
+    "users",
+    "user",
+    "accounts",
+    "auth_user",
+    "app_user",
+)
+_EMAIL_COLUMN_CANDIDATES: Final[tuple[str, ...]] = (
+    "email",
+    "username",
+    "user_email",
+)
+_PASSWORD_COLUMN_CANDIDATES: Final[tuple[str, ...]] = (
+    "password",
+    "password_hash",
+    "hashed_password",
+    "passwd",
+)
 
 
 def ensure_db_driver(db_type: str, logger: logging.Logger | None = None) -> None:
@@ -356,10 +390,9 @@ class EnvironmentManager:
         process: subprocess.Popen[str] | None = None
         try:
             process = subprocess.Popen(
-                command,
+                shlex.split(command),
                 cwd=str(workdir),
                 env=merged_env,
-                shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -417,6 +450,448 @@ class EnvironmentManager:
                 )
             finally:
                 self._sqlite_path = None
+
+    def seed_test_user(
+        self,
+        local_repo_path: str,
+        *,
+        frontend_url: str,
+        backend_url: str | None,
+        connection_string: str,
+        db_type: str,
+        email: str = DEFAULT_TEST_USER_EMAIL,
+        password: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a disposable test user for authenticated UI verification.
+
+        Prefers the app's own signup/register HTTP endpoint when one can be
+        discovered or guessed. Falls back to a direct insert into a users
+        table on the disposable database only when signup is unavailable.
+
+        Returns:
+            Dict with ``seeded``, ``skipped``, credentials, URLs, ``method``,
+            and ``playwright_guidance`` for script generation. When seeding
+            fails, includes ``ui_verification_if_skipped`` for the reviewer.
+        """
+        from tools.browser_test import (
+            SKIPPED_AUTH_UI_VERIFICATION,
+            playwright_script_guidance,
+        )
+
+        root = Path(local_repo_path).expanduser().resolve()
+        if not root.is_dir():
+            raise EnvironmentSetupError(
+                f"seed_test_user failed: local_repo_path does not exist: {root}"
+            )
+
+        resolved_password = password or f"agentic-flow-test-{uuid.uuid4().hex[:16]}"
+        api_base = (backend_url or frontend_url).rstrip("/")
+        discovered_paths = self._discover_signup_paths(root)
+        signup_paths = list(dict.fromkeys([*discovered_paths, *_COMMON_SIGNUP_PATHS]))
+
+        for path in signup_paths:
+            if self._try_http_signup(api_base, path, email, resolved_password):
+                self._logger.info(
+                    "Seeded test user via signup endpoint %s%s",
+                    api_base,
+                    path,
+                )
+                return self._seed_result(
+                    seeded=True,
+                    email=email,
+                    password=resolved_password,
+                    frontend_url=frontend_url,
+                    backend_url=backend_url,
+                    method="signup_endpoint",
+                    signup_path=path,
+                    playwright_guidance=playwright_script_guidance(
+                        base_url=frontend_url,
+                        test_email=email,
+                        test_password=resolved_password,
+                    ),
+                )
+
+        if self._try_db_user_insert(
+            connection_string,
+            db_type,
+            root,
+            email,
+            resolved_password,
+        ):
+            self._logger.info(
+                "Seeded test user via direct DB insert for %r",
+                email,
+            )
+            return self._seed_result(
+                seeded=True,
+                email=email,
+                password=resolved_password,
+                frontend_url=frontend_url,
+                backend_url=backend_url,
+                method="db_insert",
+                playwright_guidance=playwright_script_guidance(
+                    base_url=frontend_url,
+                    test_email=email,
+                    test_password=resolved_password,
+                ),
+            )
+
+        self._logger.warning(
+            "Could not seed test user for live UI verification in %s",
+            root,
+        )
+        return {
+            "seeded": False,
+            "skipped": True,
+            "skip_reason": "could not establish authenticated session",
+            "email": email,
+            "password": None,
+            "frontend_url": frontend_url,
+            "backend_url": backend_url,
+            "method": None,
+            "playwright_guidance": playwright_script_guidance(
+                base_url=frontend_url,
+                test_email=None,
+                test_password=None,
+            ),
+            "ui_verification_if_skipped": dict(SKIPPED_AUTH_UI_VERIFICATION),
+        }
+
+    @staticmethod
+    def _seed_result(
+        *,
+        seeded: bool,
+        email: str,
+        password: str,
+        frontend_url: str,
+        backend_url: str | None,
+        method: str,
+        playwright_guidance: str,
+        signup_path: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "seeded": seeded,
+            "skipped": False,
+            "skip_reason": None,
+            "email": email,
+            "password": password,
+            "frontend_url": frontend_url,
+            "backend_url": backend_url,
+            "method": method,
+            "playwright_guidance": playwright_guidance,
+        }
+        if signup_path is not None:
+            payload["signup_path"] = signup_path
+        return payload
+
+    def _discover_signup_paths(self, root: Path) -> list[str]:
+        """Scan the repo for register/signup route strings."""
+        paths: set[str] = set()
+        for path in self._iter_source_files(root):
+            if path.suffix.lower() not in {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rb"}:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for match in _SIGNUP_ROUTE_PATTERN.finditer(text):
+                candidate = match.group(1).split("?")[0].strip()
+                if candidate.startswith("/"):
+                    paths.add(candidate)
+        return sorted(paths)
+
+    def _try_http_signup(
+        self,
+        api_base: str,
+        path: str,
+        email: str,
+        password: str,
+    ) -> bool:
+        """POST signup payloads to ``api_base + path``; return True on success."""
+        url = f"{api_base.rstrip('/')}{path}"
+        payloads: list[dict[str, Any]] = [
+            {"email": email, "password": password},
+            {"username": email, "email": email, "password": password},
+            {"name": "Agentic Flow Test", "email": email, "password": password},
+            {"email": email, "password": password, "password_confirmation": password},
+        ]
+        for payload in payloads:
+            if self._post_signup_json(url, payload):
+                return True
+        return self._post_signup_form(
+            url,
+            {
+                "email": email,
+                "password": password,
+                "password_confirmation": password,
+                "username": email,
+            },
+        )
+
+    @staticmethod
+    def _post_signup_json(url: str, payload: dict[str, Any]) -> bool:
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                return response.status in {200, 201, 204}
+        except urllib.error.HTTPError as exc:
+            return exc.code in {200, 201, 204}
+        except Exception:
+            return False
+
+    @staticmethod
+    def _post_signup_form(url: str, fields: dict[str, str]) -> bool:
+        encoded = urllib.parse.urlencode(fields).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=encoded,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                return response.status in {200, 201, 204}
+        except urllib.error.HTTPError as exc:
+            return exc.code in {200, 201, 204, 302, 303}
+        except Exception:
+            return False
+
+    def _try_db_user_insert(
+        self,
+        connection_string: str,
+        db_type: str,
+        root: Path,
+        email: str,
+        password: str,
+    ) -> bool:
+        """Insert a user row directly when no signup endpoint worked."""
+        table = self._discover_user_table(root, connection_string, db_type)
+        if table is None:
+            return False
+        columns = self._list_table_columns(connection_string, db_type, table)
+        if not columns:
+            return False
+
+        email_column = next(
+            (name for name in _EMAIL_COLUMN_CANDIDATES if name in columns),
+            None,
+        )
+        password_column = next(
+            (name for name in _PASSWORD_COLUMN_CANDIDATES if name in columns),
+            None,
+        )
+        if email_column is None:
+            return False
+
+        values: dict[str, Any] = {email_column: email}
+        if password_column is not None:
+            values[password_column] = self._hash_password_for_insert(password)
+
+        insert_columns = [name for name in values if name in columns]
+        if email_column not in insert_columns:
+            return False
+
+        normalized = db_type.strip().lower()
+        if normalized == "sqlite":
+            placeholders = ", ".join("?" for _ in insert_columns)
+        else:
+            placeholders = ", ".join("%s" for _ in insert_columns)
+        column_sql = ", ".join(insert_columns)
+        sql = f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})"
+        params = tuple(values[name] for name in insert_columns)
+        try:
+            self._execute_db_write(connection_string, db_type, sql, params)
+            return True
+        except EnvironmentSetupError as exc:
+            self._logger.warning("Direct DB user insert failed: %s", exc)
+            return False
+
+    def _discover_user_table(
+        self,
+        root: Path,
+        connection_string: str,
+        db_type: str,
+    ) -> str | None:
+        existing = {
+            name.lower()
+            for name in self._list_existing_tables(connection_string, db_type)
+        }
+        for candidate in _USER_TABLE_CANDIDATES:
+            if candidate in existing:
+                return candidate
+        for path in self._iter_source_files(root):
+            if path.suffix.lower() != ".py":
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            match = re.search(
+                r"""__tablename__\s*=\s*['"]([a-zA-Z0-9_]+)['"]""",
+                text,
+            )
+            if match:
+                table = match.group(1).lower()
+                if table in existing:
+                    return table
+        return None
+
+    def _list_existing_tables(
+        self,
+        connection_string: str,
+        db_type: str,
+    ) -> list[str]:
+        normalized = db_type.strip().lower()
+        if normalized == "sqlite" and connection_string.startswith("sqlite:///"):
+            db_path = connection_string.removeprefix("sqlite:///")
+            import sqlite3
+
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            return [str(row[0]) for row in rows]
+        if normalized in {"postgres", "postgresql"} and connection_string.startswith(
+            "postgresql://"
+        ):
+            ensure_db_driver("postgres", self._logger)
+            import psycopg2
+
+            with psycopg2.connect(connection_string) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT tablename FROM pg_catalog.pg_tables "
+                        "WHERE schemaname NOT IN ('pg_catalog', 'information_schema')"
+                    )
+                    rows = cursor.fetchall()
+            return [str(row[0]) for row in rows]
+        if normalized == "mysql" and connection_string.startswith("mysql://"):
+            ensure_db_driver("mysql", self._logger)
+            import mysql.connector
+
+            with mysql.connector.connect(
+                **self._parse_mysql_connection(connection_string)
+            ) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SHOW TABLES")
+                rows = cursor.fetchall()
+            return [str(row[0]) for row in rows]
+        return []
+
+    def _list_table_columns(
+        self,
+        connection_string: str,
+        db_type: str,
+        table: str,
+    ) -> set[str]:
+        normalized = db_type.strip().lower()
+        if normalized == "sqlite" and connection_string.startswith("sqlite:///"):
+            db_path = connection_string.removeprefix("sqlite:///")
+            import sqlite3
+
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            return {str(row[1]).lower() for row in rows}
+        if normalized in {"postgres", "postgresql"} and connection_string.startswith(
+            "postgresql://"
+        ):
+            ensure_db_driver("postgres", self._logger)
+            import psycopg2
+
+            with psycopg2.connect(connection_string) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = %s",
+                        (table,),
+                    )
+                    rows = cursor.fetchall()
+            return {str(row[0]).lower() for row in rows}
+        if normalized == "mysql" and connection_string.startswith("mysql://"):
+            ensure_db_driver("mysql", self._logger)
+            import mysql.connector
+
+            with mysql.connector.connect(
+                **self._parse_mysql_connection(connection_string)
+            ) as conn:
+                cursor = conn.cursor()
+                cursor.execute(f"SHOW COLUMNS FROM `{table}`")
+                rows = cursor.fetchall()
+            return {str(row[0]).lower() for row in rows}
+        return set()
+
+    @staticmethod
+    def _parse_mysql_connection(connection_string: str) -> dict[str, Any]:
+        parsed = urllib.parse.urlparse(connection_string)
+        return {
+            "host": parsed.hostname or "127.0.0.1",
+            "port": parsed.port or 3306,
+            "user": parsed.username or "agentic_test",
+            "password": parsed.password or "agentic_test",
+            "database": (parsed.path or "/agentic_test").lstrip("/") or "agentic_test",
+        }
+
+    @staticmethod
+    def _hash_password_for_insert(password: str) -> str:
+        try:
+            import bcrypt
+
+            return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        except ImportError:
+            return password
+
+    def _execute_db_write(
+        self,
+        connection_string: str,
+        db_type: str,
+        sql: str,
+        params: tuple[Any, ...],
+    ) -> None:
+        normalized = db_type.strip().lower()
+        try:
+            if normalized == "sqlite" and connection_string.startswith("sqlite:///"):
+                db_path = connection_string.removeprefix("sqlite:///")
+                import sqlite3
+
+                with sqlite3.connect(db_path) as conn:
+                    conn.execute(sql, params)
+                    conn.commit()
+                return
+            if normalized in {"postgres", "postgresql"} and connection_string.startswith(
+                "postgresql://"
+            ):
+                ensure_db_driver("postgres", self._logger)
+                import psycopg2
+
+                with psycopg2.connect(connection_string) as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute(sql, params)
+                    conn.commit()
+                return
+            if normalized == "mysql" and connection_string.startswith("mysql://"):
+                ensure_db_driver("mysql", self._logger)
+                import mysql.connector
+
+                with mysql.connector.connect(
+                    **self._parse_mysql_connection(connection_string)
+                ) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(sql, params)
+                    conn.commit()
+                return
+            raise EnvironmentSetupError(
+                f"Unsupported db_type for user insert: {db_type!r}"
+            )
+        except EnvironmentSetupError:
+            raise
+        except Exception as exc:
+            raise EnvironmentSetupError(f"DB write failed: {exc}") from exc
 
     def _detect_db_type_with_confidence(self, root: Path) -> tuple[str | None, str]:
         scores: dict[str, int] = {key: 0 for key in _DB_IMPORT_PATTERNS}

@@ -59,6 +59,10 @@ class IssueProviderAdapter(ABC):
         """Create a new branch pointing at the tip of ``from_ref``."""
 
     @abstractmethod
+    def get_default_branch(self) -> str:
+        """Return the repository's default branch name (e.g. ``main`` or ``master``)."""
+
+    @abstractmethod
     def get_file_content(self, repo_full_name: str, path: str, ref: str) -> str:
         """Fetch a file's live text content from a repository at ``ref``.
 
