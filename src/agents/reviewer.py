@@ -212,6 +212,8 @@ class ReviewerAgent(BaseAgent):
         subtask_total: int | None = None,
         is_final_subtask: bool = True,
         repo_session: RepositorySession | None = None,
+        prior_findings: list[str] | None = None,
+        verification_pass: bool = False,
     ) -> ReviewResult:
         """Review ``implementation`` on its branch and return a :class:`ReviewResult`."""
         if repo_session is not None:
@@ -276,6 +278,8 @@ class ReviewerAgent(BaseAgent):
             subtask_index=subtask_index,
             subtask_total=subtask_total,
             is_final_subtask=is_final_subtask,
+            prior_findings=prior_findings,
+            verification_pass=verification_pass,
         )
         try:
             review = self.run(user_message, ReviewResult)
@@ -369,6 +373,8 @@ class ReviewerAgent(BaseAgent):
         subtask_index: int | None = None,
         subtask_total: int | None = None,
         is_final_subtask: bool = True,
+        prior_findings: list[str] | None = None,
+        verification_pass: bool = False,
     ) -> str:
         issue_body = str(issue.get("body") or "").strip() or "(empty)"
         files_block = "\n".join(f"- {path}" for path in implementation.files_changed) or "(none)"
@@ -419,6 +425,18 @@ class ReviewerAgent(BaseAgent):
                     "\nThis is NOT the final subtask — approve when this slice "
                     "is correct; later subtasks may still be pending.\n"
                 )
+        if verification_pass:
+            message += (
+                "\n\nVERIFICATION PASS: The implementer made no new commits this "
+                "round. Re-read the branch files and decide whether prior findings "
+                "are already satisfied. Approve when the current branch state meets "
+                "the subtask scope; reject only if concrete issues remain.\n"
+            )
+        if prior_findings:
+            message += (
+                "\nPrior review findings to re-check:\n"
+                f"{json.dumps(prior_findings, ensure_ascii=False, indent=2)}\n"
+            )
         if automated_checks is not None:
             if automated_checks.findings:
                 message += (

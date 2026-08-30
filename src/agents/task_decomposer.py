@@ -23,7 +23,7 @@ TASK_DECOMPOSER_SYSTEM_PROMPT: Final[str] = (
     "- Together, all subtasks must fully cover the approved approach — no gaps, "
     "no duplicate work.\n"
     "- Use 1 subtask when the approved approach is already small (~one file or "
-    "a trivial change). Use 2–6 subtasks for larger features. Never exceed 8.\n"
+    "a trivial change). Use 2–5 subtasks for larger features. Never exceed 5.\n"
     "- Keep each description concrete and scoped. scope: a short phrase "
     "(e.g. '~2 files, backend routes only').\n\n"
     "Respond with ONLY JSON: "

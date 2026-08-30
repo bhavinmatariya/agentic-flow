@@ -284,6 +284,7 @@ class ImplementationOrchestrator:
         """Run implement/review rounds for a single subtask."""
         last_review: ReviewResult | None = None
         last_implementation: ImplementationResult | None = None
+        baseline_implementation: ImplementationResult | None = None
         last_round_failure_note: str | None = None
         last_review_failed: bool = False
 
@@ -306,8 +307,94 @@ class ImplementationOrchestrator:
                 review_findings = list(last_review.findings)
 
             round_failure_note = last_round_failure_note
+            prior_review_failed = last_review_failed
             last_round_failure_note = None
             last_review_failed = False
+
+            if (
+                round_index > 1
+                and baseline_implementation is not None
+                and last_review is not None
+                and not last_review.approved
+                and not prior_review_failed
+            ):
+                verify_detail = (
+                    f"subtask {subtask_index}/{subtask_total} · "
+                    f"verify round {round_index}/{self._max_rounds_per_subtask}"
+                )
+                verify_ctx = (
+                    reporter.stage("REVIEWING", 0, detail=verify_detail)
+                    if reporter is not None
+                    else nullcontext()
+                )
+                merged_for_review = _merge_implementation_results(
+                    baseline_implementation,
+                    last_implementation,
+                )
+                try:
+                    with verify_ctx:
+                        verify_review = self._reviewer.review(
+                            issue,
+                            investigation,
+                            merged_for_review,
+                            primary_repo,
+                            human_approval_text=human_approval_text,
+                            subtask=subtask,
+                            subtask_index=subtask_index,
+                            subtask_total=subtask_total,
+                            is_final_subtask=is_final_subtask,
+                            repo_session=repo_session,
+                            prior_findings=review_findings,
+                            verification_pass=True,
+                        )
+                except Exception as exc:
+                    short_error = _short_error(exc)
+                    self._logger.warning(
+                        "Verification review failed on subtask %d round %d for issue #%s: %s",
+                        subtask_index,
+                        round_index,
+                        issue_number,
+                        short_error,
+                    )
+                    last_review_failed = True
+                    last_round_failure_note = (
+                        f"Verification review could not finish ({short_error}). "
+                        "Try implementing again with edit_file."
+                    )
+                    history.append(
+                        {
+                            "subtask": subtask.name,
+                            "subtask_index": subtask_index,
+                            "round": round_index,
+                            "stage": "verification_review_error",
+                            "error": short_error,
+                        }
+                    )
+                else:
+                    last_review = verify_review
+                    history.append(
+                        {
+                            "subtask": subtask.name,
+                            "subtask_index": subtask_index,
+                            "round": round_index,
+                            "stage": "verification_review",
+                            "approved": verify_review.approved,
+                            "making_progress": verify_review.making_progress,
+                            "review_summary": verify_review.summary,
+                            "findings": list(verify_review.findings),
+                        }
+                    )
+                    if verify_review.approved:
+                        return _SubtaskOutcome(
+                            passed=True,
+                            implementation_result=merged_for_review,
+                            review_result=verify_review,
+                        )
+                    review_findings = (
+                        list(verify_review.findings)
+                        if verify_review.findings
+                        else None
+                    )
 
             implement_detail = (
                 f"subtask {subtask_index}/{subtask_total} · "
@@ -343,6 +430,7 @@ class ImplementationOrchestrator:
                         subtask_index=subtask_index,
                         subtask_total=subtask_total,
                         repo_session=repo_session,
+                        baseline_implementation=baseline_implementation,
                     )
             except Exception as exc:
                 short_error = _short_error(exc)
@@ -353,6 +441,73 @@ class ImplementationOrchestrator:
                     issue_number,
                     short_error,
                 )
+                if (
+                    _is_no_edit_file_error(exc)
+                    and baseline_implementation is not None
+                ):
+                    merged_for_review = _merge_implementation_results(
+                        baseline_implementation,
+                        last_implementation,
+                    )
+                    try:
+                        recovery_review = self._reviewer.review(
+                            issue,
+                            investigation,
+                            merged_for_review,
+                            primary_repo,
+                            human_approval_text=human_approval_text,
+                            subtask=subtask,
+                            subtask_index=subtask_index,
+                            subtask_total=subtask_total,
+                            is_final_subtask=is_final_subtask,
+                            repo_session=repo_session,
+                            prior_findings=review_findings,
+                            verification_pass=True,
+                        )
+                    except Exception as review_exc:
+                        short_review_error = _short_error(review_exc)
+                        self._logger.warning(
+                            "Recovery review after phantom implement failed: %s",
+                            short_review_error,
+                        )
+                    else:
+                        last_review = recovery_review
+                        history.append(
+                            {
+                                "subtask": subtask.name,
+                                "subtask_index": subtask_index,
+                                "round": round_index,
+                                "stage": "phantom_implement_recovery_review",
+                                "approved": recovery_review.approved,
+                                "making_progress": recovery_review.making_progress,
+                                "review_summary": recovery_review.summary,
+                                "findings": list(recovery_review.findings),
+                            }
+                        )
+                        if recovery_review.approved:
+                            return _SubtaskOutcome(
+                                passed=True,
+                                implementation_result=merged_for_review,
+                                review_result=recovery_review,
+                            )
+                        review_findings = (
+                            list(recovery_review.findings)
+                            if recovery_review.findings
+                            else review_findings
+                        )
+                    last_round_failure_note = _format_force_edit_note(
+                        review_findings or []
+                    )
+                    history.append(
+                        {
+                            "subtask": subtask.name,
+                            "subtask_index": subtask_index,
+                            "round": round_index,
+                            "stage": "implement_phantom_error",
+                            "error": short_error,
+                        }
+                    )
+                    continue
                 last_round_failure_note = (
                     f"Your previous attempt failed with: {short_error}. Try again."
                 )
@@ -366,6 +521,11 @@ class ImplementationOrchestrator:
                     }
                 )
                 continue
+
+            baseline_implementation = _merge_implementation_results(
+                baseline_implementation,
+                implementation,
+            )
 
             try:
                 with review_ctx:
@@ -684,6 +844,53 @@ def _short_error(exc: BaseException) -> str:
     if first_line:
         return first_line[:300]
     return type(exc).__name__
+
+
+def _is_no_edit_file_error(exc: BaseException) -> bool:
+    """Return True when implementer returned JSON without edit_file commits."""
+    message = str(exc).lower()
+    return (
+        "no successful edit_file" in message
+        or "no edit_file commit" in message
+    )
+
+
+def _format_force_edit_note(findings: list[str]) -> str:
+    """Build a strict retry note after a phantom implement attempt."""
+    lines = [
+        "Your last response returned JSON without any successful edit_file commits.",
+        "You MUST call edit_file for each remaining review finding below.",
+        "Do not return final JSON until every open finding is fixed on the branch.",
+    ]
+    if findings:
+        lines.append("Open findings:")
+        lines.extend(f"- {item}" for item in findings)
+    return "\n".join(lines)
+
+
+def _merge_implementation_results(
+    baseline: ImplementationResult | None,
+    latest: ImplementationResult | None,
+) -> ImplementationResult:
+    """Merge file lists from prior and current implement rounds."""
+    if latest is None and baseline is None:
+        raise AgentError("Cannot merge implementation results: both inputs are None")
+    if latest is None:
+        assert baseline is not None
+        return baseline
+    if baseline is None:
+        return latest
+    merged_files = sorted(
+        set(baseline.files_changed) | set(latest.files_changed)
+    )
+    summary = latest.summary.strip() or baseline.summary
+    return latest.model_copy(
+        update={
+            "branch_name": latest.branch_name or baseline.branch_name,
+            "files_changed": merged_files,
+            "summary": summary,
+        }
+    )
 
 
 def _layers_checked_summary(review_result: ReviewResult) -> str:

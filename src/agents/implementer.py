@@ -39,10 +39,12 @@ IMPLEMENTER_SYSTEM_PROMPT: Final[str] = (
     "current code, stop and explain what's different rather than "
     "guessing.\n"
     "7. If you are given issues_found from a previous review round, you "
-    "must address each one with a concrete code change. You may only "
-    "conclude that no changes are needed if issues_found is empty — never "
-    "override or dismiss a specific finding from the reviewer without "
-    "fixing it.\n"
+    "must address each one with a concrete code change via edit_file. If "
+    "read_file shows the branch already satisfies a finding, you may skip "
+    "that edit but must still call edit_file for any finding that is not "
+    "yet satisfied — never return final JSON with open findings and zero "
+    "successful edit_file calls unless a prior round already committed the "
+    "required files and you verified each finding with read_file.\n"
     "8. Before finishing any change, check whether your new code creates "
     "two competing implementations of the same behavior (conflicting CSS "
     "rules, duplicate state, overlapping logic, etc.). If so, resolve the "
@@ -62,6 +64,13 @@ IMPLEMENTER_SYSTEM_PROMPT: Final[str] = (
     "When finished, respond with ONLY JSON: {\"branch_name\": str, "
     "\"files_changed\": [str], \"summary\": str}"
 )
+
+_FORCE_EDIT_RETRY_SUFFIX: Final[str] = (
+    "\n\nCRITICAL RETRY: Your previous JSON was rejected because no edit_file "
+    "call returned {\"status\": \"committed\"} while review findings were still "
+    "open. Call edit_file now for each remaining finding before returning JSON."
+)
+
 
 IMPLEMENTER_TOOL_DEFINITIONS: Final[list[dict[str, Any]]] = [
     {
@@ -243,6 +252,7 @@ class ImplementerAgent(BaseAgent):
         subtask_index: int | None = None,
         subtask_total: int | None = None,
         repo_session: RepositorySession | None = None,
+        baseline_implementation: ImplementationResult | None = None,
     ) -> ImplementationResult:
         """Apply ``approach`` on a dedicated branch and return the outcome.
 
@@ -321,6 +331,7 @@ class ImplementerAgent(BaseAgent):
                 subtask=subtask,
                 subtask_index=subtask_index,
                 subtask_total=subtask_total,
+                baseline_implementation=baseline_implementation,
             )
             result = self.run(user_message, ImplementationResult)
             if result.branch_name != branch_name:
@@ -330,12 +341,50 @@ class ImplementerAgent(BaseAgent):
                     branch_name,
                 )
                 result = result.model_copy(update={"branch_name": branch_name})
-            return self._validate_implementation(
-                result,
-                review_findings=review_findings,
-                subtask=subtask,
-                attempt_failure_note=attempt_failure_note,
-            )
+            try:
+                return self._validate_implementation(
+                    result,
+                    review_findings=review_findings,
+                    subtask=subtask,
+                    attempt_failure_note=attempt_failure_note,
+                    baseline_implementation=baseline_implementation,
+                )
+            except AgentError as exc:
+                if not (
+                    _is_no_edit_file_error(exc)
+                    and review_findings
+                    and not _is_reviewer_infra_retry(attempt_failure_note)
+                ):
+                    raise
+                if (
+                    baseline_implementation is not None
+                    and self._baseline_files_on_branch(baseline_implementation)
+                ):
+                    self._logger.info(
+                        "No new edit_file commits; prior round files remain on branch "
+                        "— allowing re-review."
+                    )
+                    return self._merge_with_baseline(result, baseline_implementation)
+                self._logger.warning(
+                    "Implementer returned no edit_file commits with open findings; "
+                    "retrying once with forced edit_file instruction."
+                )
+                retry_result = self.run(
+                    user_message + _FORCE_EDIT_RETRY_SUFFIX,
+                    ImplementationResult,
+                )
+                if retry_result.branch_name != branch_name:
+                    retry_result = retry_result.model_copy(
+                        update={"branch_name": branch_name}
+                    )
+                return self._validate_implementation(
+                    retry_result,
+                    review_findings=review_findings,
+                    subtask=subtask,
+                    attempt_failure_note=attempt_failure_note,
+                    baseline_implementation=baseline_implementation,
+                    strict_commits=True,
+                )
         finally:
             self._run_session_label = None
             self._committed_paths = set()
@@ -360,6 +409,7 @@ class ImplementerAgent(BaseAgent):
         subtask: Subtask | None = None,
         subtask_index: int | None = None,
         subtask_total: int | None = None,
+        baseline_implementation: ImplementationResult | None = None,
     ) -> str:
         """Assemble the user turn from issue, investigation, and approach context."""
         issue_body = str(issue.get("body") or "").strip() or "(empty)"
@@ -397,9 +447,20 @@ class ImplementerAgent(BaseAgent):
         )
         if review_findings:
             message += (
-                "Previous review issues_found (address every item with a concrete "
-                "code change):\n"
+                "Previous review issues_found (address every item with edit_file, "
+                "or read_file + verify on branch before concluding no change needed):\n"
                 f"{json.dumps(review_findings, ensure_ascii=False, indent=2)}\n\n"
+            )
+        if baseline_implementation is not None and baseline_implementation.files_changed:
+            prior_files = "\n".join(
+                f"- {path}" for path in baseline_implementation.files_changed
+            )
+            message += (
+                "Files already committed on this branch from a prior implement round:\n"
+                f"{prior_files}\n\n"
+                "If these commits already satisfy the open findings, verify with "
+                "read_file and explain in summary — otherwise call edit_file for "
+                "each remaining gap.\n\n"
             )
         if attempt_failure_note and attempt_failure_note.strip():
             message += (
@@ -557,6 +618,8 @@ class ImplementerAgent(BaseAgent):
         review_findings: list[str] | None,
         subtask: Subtask | None,
         attempt_failure_note: str | None = None,
+        baseline_implementation: ImplementationResult | None = None,
+        strict_commits: bool = False,
     ) -> ImplementationResult:
         """Ensure claimed files exist on GitHub and commits match reality."""
         repo = self._working_repo
@@ -580,6 +643,18 @@ class ImplementerAgent(BaseAgent):
         require_commit_for_findings = bool(review_findings) and not _is_reviewer_infra_retry(
             attempt_failure_note
         )
+        if (
+            require_commit_for_findings
+            and not self._committed_paths
+            and not strict_commits
+            and baseline_implementation is not None
+            and self._baseline_files_on_branch(baseline_implementation)
+        ):
+            self._logger.info(
+                "Skipping edit_file requirement; prior round commits exist on branch."
+            )
+            require_commit_for_findings = False
+
         if require_commit_for_findings and not self._committed_paths:
             raise AgentError(
                 "Reviewer findings require code changes but no successful edit_file "
@@ -603,7 +678,39 @@ class ImplementerAgent(BaseAgent):
                 result = result.model_copy(update={"files_changed": merged_paths})
         elif claimed:
             result = result.model_copy(update={"files_changed": sorted(set(claimed))})
+        if baseline_implementation is not None:
+            result = self._merge_with_baseline(result, baseline_implementation)
         return result
+
+    def _baseline_files_on_branch(
+        self,
+        baseline: ImplementationResult,
+    ) -> bool:
+        """Return True when every baseline file exists on the working branch."""
+        repo = self._working_repo
+        branch = self._working_branch
+        if not repo or not branch or not baseline.files_changed:
+            return False
+        return all(
+            self._code_edit.file_exists_on_branch(
+                repo,
+                branch,
+                _normalize_repo_path(path),
+            )
+            for path in baseline.files_changed
+        )
+
+    @staticmethod
+    def _merge_with_baseline(
+        result: ImplementationResult,
+        baseline: ImplementationResult,
+    ) -> ImplementationResult:
+        """Union file lists from the current and baseline implement rounds."""
+        merged_files = sorted(
+            set(result.files_changed) | set(baseline.files_changed)
+        )
+        summary = result.summary.strip() or baseline.summary
+        return result.model_copy(update={"files_changed": merged_files, "summary": summary})
 
 
 def _normalize_repo_path(path: str) -> str:
@@ -626,6 +733,15 @@ def _is_reviewer_infra_retry(note: str | None) -> bool:
         "exceeded the maximum",
     )
     return any(marker in lowered for marker in markers)
+
+
+def _is_no_edit_file_error(exc: BaseException) -> bool:
+    """Return True when validation failed due to missing edit_file commits."""
+    message = str(exc).lower()
+    return (
+        "no successful edit_file" in message
+        or "no edit_file commit" in message
+    )
 
 
 def _require_str(tool_input: dict[str, Any], key: str) -> str:

@@ -200,7 +200,7 @@ class SubtaskPlan(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    subtasks: list[Subtask] = Field(..., min_length=1, max_length=8)
+    subtasks: list[Subtask] = Field(..., min_length=1, max_length=5)
 
     @model_validator(mode="after")
     def _sort_subtasks(self) -> SubtaskPlan:
