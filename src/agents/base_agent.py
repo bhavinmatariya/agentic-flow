@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from typing import Any, TypeVar
+from typing import Any, Final, TypeVar
 
 from anthropic import Anthropic
 from pydantic import BaseModel, ValidationError
@@ -17,6 +17,11 @@ from utils.logger import get_logger
 TModel = TypeVar("TModel", bound=BaseModel)
 
 _MAX_TURNS: int = 25
+_MAX_JSON_RETRIES: int = 2
+_JSON_RETRY_PROMPT: Final[str] = (
+    "Your last response was not valid JSON. Respond with ONLY a single valid "
+    "JSON object matching the required schema — no prose before or after."
+)
 
 
 class BaseAgent(ABC):
@@ -101,7 +106,7 @@ class BaseAgent(ABC):
                     f"Claude returned no text (stop_reason={stop_reason!r}). "
                     "The model must emit a JSON object matching the output schema."
                 )
-            return self._parse_output(final_text, output_model)
+            return self._finalize_json_response(response, messages, output_model)
 
         raise AgentError(
             f"Agent {self._agent_type!r} exceeded the maximum of {_MAX_TURNS} "
@@ -186,23 +191,65 @@ class BaseAgent(ABC):
                 parts.append(block.text)
         return "".join(parts)
 
+    def _finalize_json_response(
+        self,
+        response: Any,
+        messages: list[dict[str, Any]],
+        output_model: type[TModel],
+    ) -> TModel:
+        """Parse the model's final answer, retrying invalid JSON in-conversation."""
+        current_response = response
+        last_error: Exception | None = None
+
+        for attempt_index in range(_MAX_JSON_RETRIES + 1):
+            final_text = self._collect_text(current_response)
+            if not final_text.strip():
+                raise AgentError(
+                    "Claude returned no text when a JSON object was required."
+                )
+
+            try:
+                return self._parse_output(final_text, output_model)
+            except (json.JSONDecodeError, ValidationError) as exc:
+                last_error = exc
+                if attempt_index >= _MAX_JSON_RETRIES:
+                    break
+
+                self._logger.warning(
+                    "Agent %s returned invalid JSON, retrying (attempt %d)",
+                    self._agent_type,
+                    attempt_index + 1,
+                )
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": self._assistant_content(current_response),
+                    }
+                )
+                messages.append({"role": "user", "content": _JSON_RETRY_PROMPT})
+                current_response = self._create_message(messages)
+                if current_response.stop_reason == "tool_use":
+                    raise AgentError(
+                        f"Agent {self._agent_type!r} returned tool_use when asked "
+                        "to fix invalid JSON output."
+                    ) from exc
+
+        assert last_error is not None
+        if isinstance(last_error, json.JSONDecodeError):
+            preview = self._collect_text(current_response).strip().replace("\n", " ")[:500]
+            raise AgentError(
+                f"Agent output was not valid JSON after {_MAX_JSON_RETRIES} "
+                f"retries: {last_error}. Preview: {preview!r}"
+            ) from last_error
+        raise AgentError(
+            f"Agent output failed {output_model.__name__} validation after "
+            f"{_MAX_JSON_RETRIES} retries: {last_error}"
+        ) from last_error
+
     def _parse_output(self, text: str, output_model: type[TModel]) -> TModel:
         """Parse Claude's final text as JSON and validate it as ``output_model``."""
-        try:
-            payload = _extract_json_object(text)
-        except json.JSONDecodeError as exc:
-            preview = text.strip().replace("\n", " ")[:500]
-            raise AgentError(
-                f"Agent output was not valid JSON: {exc}. "
-                f"Preview: {preview!r}"
-            ) from exc
-
-        try:
-            return output_model.model_validate(payload)
-        except ValidationError as exc:
-            raise AgentError(
-                f"Agent output failed {output_model.__name__} validation: {exc}"
-            ) from exc
+        payload = _extract_json_object(text)
+        return output_model.model_validate(payload)
 
 
 def _extract_json_object(text: str) -> Any:

@@ -35,7 +35,17 @@ IMPLEMENTER_SYSTEM_PROMPT: Final[str] = (
     "Do not use any other sentinel for new files.\n"
     "6. If something described in the approach no longer matches the "
     "current code, stop and explain what's different rather than "
-    "guessing.\n\n"
+    "guessing.\n"
+    "7. If you are given issues_found from a previous review round, you "
+    "must address each one with a concrete code change. You may only "
+    "conclude that no changes are needed if issues_found is empty — never "
+    "override or dismiss a specific finding from the reviewer without "
+    "fixing it.\n"
+    "8. Before finishing any change, check whether your new code creates "
+    "two competing implementations of the same behavior (conflicting CSS "
+    "rules, duplicate state, overlapping logic, etc.). If so, resolve the "
+    "conflict directly — remove or override the losing one — rather than "
+    "leaving both in place and hoping yours wins.\n\n"
     "When finished, respond with ONLY JSON: {\"branch_name\": str, "
     "\"files_changed\": [str], \"summary\": str}"
 )
@@ -192,6 +202,8 @@ class ImplementerAgent(BaseAgent):
         primary_repo: str,
         *,
         human_approval_text: str | None = None,
+        review_findings: list[str] | None = None,
+        attempt_failure_notes: list[str] | None = None,
     ) -> ImplementationResult:
         """Apply ``approach`` on a dedicated branch and return the outcome.
 
@@ -201,6 +213,10 @@ class ImplementerAgent(BaseAgent):
             investigation: Prior investigation findings.
             approach: Human-approved approach to implement.
             primary_repo: GitHub slug of the repository that owns the issue.
+            human_approval_text: Optional human approval comment text.
+            review_findings: Exact reviewer findings from the prior round when
+                re-implementing after a failed review.
+            attempt_failure_notes: Prior round failures to recover from.
 
         Returns:
             Validated implementation metadata including branch and files changed.
@@ -222,6 +238,8 @@ class ImplementerAgent(BaseAgent):
             branch_name=branch_name,
             local_repo_path=local_repo_path,
             human_approval_text=human_approval_text,
+            review_findings=review_findings,
+            attempt_failure_notes=attempt_failure_notes,
         )
         result = self.run(user_message, ImplementationResult)
         if result.branch_name != branch_name:
@@ -243,6 +261,8 @@ class ImplementerAgent(BaseAgent):
         branch_name: str,
         local_repo_path: str,
         human_approval_text: str | None = None,
+        review_findings: list[str] | None = None,
+        attempt_failure_notes: list[str] | None = None,
     ) -> str:
         """Assemble the user turn from issue, investigation, and approach context."""
         issue_body = str(issue.get("body") or "").strip() or "(empty)"
@@ -268,7 +288,7 @@ class ImplementerAgent(BaseAgent):
             or "(no human approval comment provided)"
         )
 
-        return (
+        message = (
             "Implement the approved fix approach.\n\n"
             f"Primary repository: {primary_repo}\n"
             f"Working branch: {branch_name}\n"
@@ -277,6 +297,19 @@ class ImplementerAgent(BaseAgent):
             f"Issue body:\n{issue_body}\n\n"
             f"Human approval / feedback (apply every literal detail from this text):\n"
             f"{approval_block}\n\n"
+        )
+        if review_findings:
+            message += (
+                "Previous review issues_found (address every item with a concrete "
+                "code change):\n"
+                f"{json.dumps(review_findings, ensure_ascii=False, indent=2)}\n\n"
+            )
+        if attempt_failure_notes:
+            message += (
+                "Previous attempt failures (read carefully and fix before proceeding):\n"
+                f"{json.dumps(attempt_failure_notes, ensure_ascii=False, indent=2)}\n\n"
+            )
+        message += (
             f"Issue nature:\n{investigation.issue_nature}\n\n"
             f"Root cause:\n{investigation.root_cause}\n\n"
             f"Evidence:\n{evidence_block}\n\n"
@@ -298,6 +331,7 @@ class ImplementerAgent(BaseAgent):
             f"Set branch_name to {branch_name!r} in your final JSON. "
             "Respond with only the JSON object specified in your instructions."
         )
+        return message
 
     def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """Route Claude tool calls to search/edit helpers."""

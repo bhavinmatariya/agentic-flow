@@ -4,20 +4,25 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import subprocess
 import sys
 import tempfile
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from pydantic import ValidationError
 
 # Allow running without installing the package.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from anthropic import Anthropic
+from github import GithubException
 
-from adapters.base import AdapterError
 from adapters.github_adapter import GitHubAdapter
 from agents.implementer import ImplementerAgent
 from agents.investigator import InvestigatorAgent
@@ -30,6 +35,7 @@ from core.models import ParsedIntent
 from core.orchestrator import (
     DONE_LABEL,
     IN_PROGRESS_LABEL,
+    NEEDS_HUMAN_LABEL,
     ImplementationOrchestrator,
     resolve_approach,
 )
@@ -59,6 +65,29 @@ class _PipelineAgents:
     orchestrator: ImplementationOrchestrator
 
 
+def _plain_language_error(exc: BaseException) -> str:
+    """Map an exception to a short plain-language explanation for issue comments."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, GithubException):
+            return "GitHub API had a temporary problem."
+        if isinstance(current, (json.JSONDecodeError, ValidationError)):
+            return "The AI's response was malformed."
+        if isinstance(current, subprocess.CalledProcessError):
+            command = current.cmd
+            command_text = (
+                " ".join(str(part) for part in command)
+                if isinstance(command, (list, tuple))
+                else str(command)
+            )
+            if "git" in command_text.lower():
+                return "A git operation failed."
+        current = current.__cause__ or current.__context__
+    return "An unexpected internal error occurred."
+
+
 def _error_summary(exc: BaseException) -> str:
     """Return a short, user-facing error summary without a stack trace."""
     message = str(exc).strip().replace("\r", " ")
@@ -66,33 +95,47 @@ def _error_summary(exc: BaseException) -> str:
     return first_line[:500] if first_line else type(exc).__name__
 
 
-def _agent_error_comment(exc: BaseException) -> str:
-    """Build a GitHub comment for an unhandled pipeline failure."""
-    return (
-        "## Agent error\n\n"
-        "The agent hit an error and could not finish this run.\n\n"
-        f"**Summary:** {_error_summary(exc)}\n\n"
-        "Please check the workflow logs for full details and re-trigger when ready."
-    )
-
-
-def _post_agent_error(
+def _post_unhandled_pipeline_failure(
     adapter: GitHubAdapter | None,
     issue_number: int,
     exc: BaseException,
+    reporter: RunReporter,
 ) -> None:
-    """Post a short failure comment and log the full exception."""
-    logger.exception("Pipeline failed for issue #%s: %s", issue_number, exc)
+    """Log technical details, post a plain-language issue comment, and label needs-human."""
+    print("::group::Technical details", flush=True)
+    logger.exception("Unhandled pipeline failure for issue #%s", issue_number)
+    print(traceback.format_exc(), flush=True)
+    print("::endgroup::", flush=True)
+
+    plain = _plain_language_error(exc)
+    short = _error_summary(exc)
+    comment = (
+        "## Agent error\n\n"
+        f"{plain}\n\n"
+        f"**Details:** {short}\n\n"
+        "The issue has been labeled **`agent:needs-human`**. "
+        "Please check the workflow logs for full details and retry or take over manually."
+    )
+
     if adapter is None:
+        reporter.record_outcome_needs_human(round_count=0)
         return
+
     try:
-        adapter.post_comment(issue_number, _agent_error_comment(exc))
+        adapter.post_comment(issue_number, comment)
+        if adapter.has_label(issue_number, IN_PROGRESS_LABEL):
+            adapter.remove_label(issue_number, IN_PROGRESS_LABEL)
+        if adapter.has_label(issue_number, AWAITING_APPROVAL_LABEL):
+            adapter.remove_label(issue_number, AWAITING_APPROVAL_LABEL)
+        adapter.add_label(issue_number, NEEDS_HUMAN_LABEL)
     except Exception as post_exc:
         logger.exception(
-            "Could not post agent error comment on issue #%s: %s",
+            "Could not post failure comment or label on issue #%s: %s",
             issue_number,
             post_exc,
         )
+
+    reporter.record_outcome_needs_human(round_count=0)
 
 
 def _find_latest_proposal_comment(
@@ -498,13 +541,8 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(error_text)
         reporter.record_outcome_error(error_text)
         exit_code = 1
-    except (AdapterError, AgentError) as exc:
-        _post_agent_error(adapter, issue_number, exc)
-        reporter.record_outcome_error(_error_summary(exc))
-        exit_code = 1
     except Exception as exc:
-        _post_agent_error(adapter, issue_number, exc)
-        reporter.record_outcome_error(_error_summary(exc))
+        _post_unhandled_pipeline_failure(adapter, issue_number, exc, reporter)
         exit_code = 1
     finally:
         reporter.write_step_summary(exit_code)

@@ -231,6 +231,8 @@ class ReviewResult(BaseModel):
         approved: Whether the change is ready to open as a pull request.
         summary: Overall review verdict in plain language.
         findings: Specific issues, test failures, or verification notes.
+        making_progress: Whether another implement/review round is likely to help.
+            Set to ``false`` only when the reviewer sees no viable path forward.
         layers_detected: Which change layers were detected in the diff
             (for example frontend, database, backend flags).
         ui_verification: Playwright live UI check result when the full-stack
@@ -244,6 +246,7 @@ class ReviewResult(BaseModel):
     approved: bool
     summary: str = Field(..., min_length=1)
     findings: list[str] = Field(default_factory=list)
+    making_progress: bool = True
     layers_detected: dict[str, bool] = Field(default_factory=dict)
     ui_verification: dict[str, Any] | None = None
     db_verification: dict[str, Any] | None = None

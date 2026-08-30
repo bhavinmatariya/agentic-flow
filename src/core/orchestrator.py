@@ -22,7 +22,7 @@ from utils.logger import RunReporter, get_logger
 IN_PROGRESS_LABEL = "agent:in-progress"
 NEEDS_HUMAN_LABEL = "agent:needs-human"
 DONE_LABEL = "agent:done"
-DEFAULT_MAX_ROUNDS = 3
+DEFAULT_MAX_ROUNDS = 6
 
 
 @dataclass
@@ -71,7 +71,7 @@ class ImplementationOrchestrator:
         history: list[dict[str, Any]] = []
         last_review: ReviewResult | None = None
         last_implementation: ImplementationResult | None = None
-        previous_failure_signature: str | None = None
+        attempt_failure_notes: list[str] = []
 
         for round_index in range(1, self._max_rounds + 1):
             self._logger.info(
@@ -80,8 +80,8 @@ class ImplementationOrchestrator:
                 self._max_rounds,
                 issue_number,
             )
-            implement_pct = min(60 + (round_index - 1) * 8, 78)
-            review_pct = min(78 + (round_index - 1) * 8, 92)
+            implement_pct = min(60 + (round_index - 1) * 5, 78)
+            review_pct = min(78 + (round_index - 1) * 5, 92)
             implement_ctx = (
                 reporter.stage("IMPLEMENTING", implement_pct)
                 if reporter is not None
@@ -92,6 +92,12 @@ class ImplementationOrchestrator:
                 if reporter is not None
                 else nullcontext()
             )
+
+            review_findings: list[str] | None = None
+            if last_review is not None and last_review.findings:
+                review_findings = list(last_review.findings)
+
+            implementation: ImplementationResult | None = None
             try:
                 with implement_ctx:
                     implementation = self._implementer.implement(
@@ -100,30 +106,32 @@ class ImplementationOrchestrator:
                         approach,
                         primary_repo,
                         human_approval_text=human_approval_text,
+                        review_findings=review_findings,
+                        attempt_failure_notes=attempt_failure_notes or None,
                     )
-            except AgentError as exc:
+            except Exception as exc:
+                short_error = _short_error(exc)
+                self._logger.warning(
+                    "Implementer failed in round %d/%d for issue #%s: %s",
+                    round_index,
+                    self._max_rounds,
+                    issue_number,
+                    short_error,
+                )
+                attempt_failure_notes.append(
+                    f"Your previous attempt failed with: {short_error}. "
+                    "Try again, fixing that."
+                )
                 history.append(
                     {
                         "round": round_index,
-                        "stage": "agent_error",
-                        "error": str(exc),
+                        "stage": "implement_error",
+                        "error": short_error,
                     }
                 )
-                diagnostic = self._build_diagnostic_comment(
-                    issue=issue,
-                    approach=approach,
-                    history=history,
-                    reason=f"Implementer error in round {round_index}: {exc}",
-                )
-                self._mark_needs_human(issue_number, diagnostic)
-                return OrchestratorResult(
-                    passed=False,
-                    review_result=last_review,
-                    implementation_result=last_implementation,
-                    diagnostic_comment=diagnostic,
-                    round_history=history,
-                )
+                continue
 
+            review: ReviewResult | None = None
             try:
                 with review_ctx:
                     review = self._reviewer.review(
@@ -133,28 +141,29 @@ class ImplementationOrchestrator:
                         primary_repo,
                         human_approval_text=human_approval_text,
                     )
-            except AgentError as exc:
+            except Exception as exc:
+                short_error = _short_error(exc)
+                self._logger.warning(
+                    "Reviewer failed in round %d/%d for issue #%s: %s",
+                    round_index,
+                    self._max_rounds,
+                    issue_number,
+                    short_error,
+                )
+                attempt_failure_notes.append(
+                    f"Your previous attempt failed with: {short_error}. "
+                    "Try again, fixing that."
+                )
                 history.append(
                     {
                         "round": round_index,
-                        "stage": "agent_error",
-                        "error": str(exc),
+                        "stage": "review_error",
+                        "error": short_error,
+                        "implementation_summary": implementation.summary,
                     }
                 )
-                diagnostic = self._build_diagnostic_comment(
-                    issue=issue,
-                    approach=approach,
-                    history=history,
-                    reason=f"Reviewer error in round {round_index}: {exc}",
-                )
-                self._mark_needs_human(issue_number, diagnostic)
-                return OrchestratorResult(
-                    passed=False,
-                    review_result=last_review,
-                    implementation_result=last_implementation,
-                    diagnostic_comment=diagnostic,
-                    round_history=history,
-                )
+                last_implementation = implementation
+                continue
 
             last_implementation = implementation
             last_review = review
@@ -162,6 +171,7 @@ class ImplementationOrchestrator:
                 {
                     "round": round_index,
                     "approved": review.approved,
+                    "making_progress": review.making_progress,
                     "implementation_summary": implementation.summary,
                     "review_summary": review.summary,
                     "findings": list(review.findings),
@@ -208,15 +218,14 @@ class ImplementationOrchestrator:
                     round_history=history,
                 )
 
-            failure_signature = f"{review.summary}|{'|'.join(review.findings)}"
-            if failure_signature == previous_failure_signature:
+            if not review.making_progress:
                 diagnostic = self._build_diagnostic_comment(
                     issue=issue,
                     approach=approach,
                     history=history,
                     reason=(
-                        "Review failed with the same result twice in a row; "
-                        "stopping early to avoid spinning."
+                        "The reviewer indicated that further automated rounds "
+                        "are unlikely to help (making_progress=false)."
                     ),
                 )
                 self._mark_needs_human(issue_number, diagnostic)
@@ -227,7 +236,6 @@ class ImplementationOrchestrator:
                     diagnostic_comment=diagnostic,
                     round_history=history,
                 )
-            previous_failure_signature = failure_signature
 
         diagnostic = self._build_diagnostic_comment(
             issue=issue,
@@ -339,9 +347,11 @@ class ImplementationOrchestrator:
             lines.append("- No rounds completed.")
         else:
             for entry in history:
-                if entry.get("stage") == "agent_error":
+                stage = entry.get("stage")
+                if stage in {"implement_error", "review_error", "agent_error"}:
                     lines.append(
-                        f"- Round {entry['round']}: agent error — {entry.get('error')}"
+                        f"- Round {entry['round']}: {stage.replace('_', ' ')} — "
+                        f"{entry.get('error')}"
                     )
                     continue
                 status = "approved" if entry.get("approved") else "not approved"
@@ -382,6 +392,15 @@ def resolve_approach(proposal_approaches: list[Approach], selected: str | None) 
             return approach
 
     return proposal_approaches[0]
+
+
+def _short_error(exc: BaseException) -> str:
+    """Return a single-line error summary safe to pass to the next agent turn."""
+    message = str(exc).strip().replace("\r", " ")
+    first_line = message.split("\n", 1)[0].strip()
+    if first_line:
+        return first_line[:300]
+    return type(exc).__name__
 
 
 def _layers_checked_summary(review_result: ReviewResult) -> str:

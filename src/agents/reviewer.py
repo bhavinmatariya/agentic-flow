@@ -23,6 +23,7 @@ from tools.browser_test import (
 from tools.code_search import CodeSearchTool
 from tools.db_verifier import DBVerifierTool
 from tools.environment_manager import EnvironmentManager, checkout_git_branch
+from tools.test_runner import AutomatedCheckResult, run_automated_checks
 
 _FRONTEND_MARKERS: Final[tuple[str, ...]] = (
     "frontend/",
@@ -104,8 +105,17 @@ REVIEWER_SYSTEM_PROMPT: Final[str] = (
     "literal detail was not applied, set approved=false and name the missing "
     "detail explicitly in findings — do not approve just because the code runs "
     "or looks reasonable.\n\n"
+    "If a competing-implementation conflict is found (duplicate CSS rules, "
+    "overlapping state, two code paths for the same behavior), require the "
+    "next round's fix to remove the conflict, not add a third implementation "
+    "on top. Report this clearly in findings.\n\n"
+    "Set making_progress=false only when you believe another implement/review "
+    "round cannot help (blocked requirement, fundamental mismatch, or the "
+    "same failure would repeat with no new lever). Otherwise keep "
+    "making_progress=true so the agent can self-heal.\n\n"
     "Respond with ONLY JSON: {\"approved\": bool, \"summary\": str, "
-    "\"findings\": [str], \"layers_detected\": {\"frontend\": bool, "
+    "\"findings\": [str], \"making_progress\": bool, \"layers_detected\": "
+    "{\"frontend\": bool, "
     "\"database\": bool, \"backend\": bool}, \"ui_verification\": object|null, "
     "\"db_verification\": object|null}. Live verification dicts should "
     "include ui_passed/db_passed booleans plus details."
@@ -182,6 +192,7 @@ class ReviewerAgent(BaseAgent):
             logger=self._logger,
         )
         layers = detect_change_layers(implementation.files_changed)
+        automated_checks = run_automated_checks(local_repo_path)
         default_effort = self._settings.agent_config("reviewer").effort
         self._review_context = {
             "issue": issue,
@@ -191,6 +202,7 @@ class ReviewerAgent(BaseAgent):
             "local_repo_path": local_repo_path,
             "layers": layers,
             "human_approval_text": human_approval_text,
+            "automated_checks": automated_checks,
         }
 
         if layers.get("frontend") and layers.get("database"):
@@ -207,9 +219,11 @@ class ReviewerAgent(BaseAgent):
             local_repo_path=local_repo_path,
             layers=layers,
             human_approval_text=human_approval_text,
+            automated_checks=automated_checks,
         )
         try:
-            return self.run(user_message, ReviewResult)
+            review = self.run(user_message, ReviewResult)
+            return _merge_automated_checks(review, automated_checks)
         except EnvironmentSetupError as exc:
             self._logger.warning(
                 "Live verification environment setup failed: %s",
@@ -275,6 +289,7 @@ class ReviewerAgent(BaseAgent):
         layers: dict[str, bool],
         human_approval_text: str | None = None,
         live_verification_note: str | None = None,
+        automated_checks: AutomatedCheckResult | None = None,
     ) -> str:
         issue_body = str(issue.get("body") or "").strip() or "(empty)"
         files_block = "\n".join(f"- {path}" for path in implementation.files_changed) or "(none)"
@@ -298,6 +313,21 @@ class ReviewerAgent(BaseAgent):
             "Start by calling detect_change_layers with files_changed. "
             "Run live verification only when both frontend and database are true."
         )
+        if automated_checks is not None:
+            if automated_checks.findings:
+                message += (
+                    "\n\nAutomated test/build failures already observed "
+                    "(include these in findings if still applicable):\n"
+                    f"{json.dumps(automated_checks.findings, ensure_ascii=False, indent=2)}"
+                )
+            if automated_checks.skipped:
+                skipped_block = "\n".join(
+                    f"- {item}" for item in automated_checks.skipped
+                )
+                message += (
+                    "\n\nAutomated checks skipped (informational — not failures):\n"
+                    f"{skipped_block}"
+                )
         if live_verification_note:
             message += (
                 "\n\nIMPORTANT: Live verification could not be completed.\n"
@@ -328,8 +358,13 @@ class ReviewerAgent(BaseAgent):
             layers=context["layers"],
             human_approval_text=context.get("human_approval_text"),
             live_verification_note=reason,
+            automated_checks=context.get("automated_checks"),
         )
-        return self.run(fallback_message, ReviewResult)
+        review = self.run(fallback_message, ReviewResult)
+        automated = context.get("automated_checks")
+        if isinstance(automated, AutomatedCheckResult):
+            return _merge_automated_checks(review, automated)
+        return review
 
     def _check_live_verification_budget(self) -> None:
         if self._live_state is None:
@@ -591,6 +626,31 @@ class ReviewerAgent(BaseAgent):
                 self._logger.warning("Cleanup failed to delete test marker row: %s", exc)
 
         self._active_connection_string = None
+
+
+def _merge_automated_checks(
+    review: ReviewResult,
+    automated: AutomatedCheckResult,
+) -> ReviewResult:
+    """Fold deterministic test/build failures into the model's review result."""
+    findings = list(review.findings)
+    for item in automated.findings:
+        if item not in findings:
+            findings.append(item)
+
+    approved = review.approved and not automated.findings
+    summary = review.summary
+    if automated.skipped:
+        skipped_note = "; ".join(automated.skipped)
+        summary = f"{summary.rstrip()} ({skipped_note})"
+
+    return review.model_copy(
+        update={
+            "approved": approved,
+            "findings": findings,
+            "summary": summary,
+        }
+    )
 
 
 def detect_change_layers(files_changed: list[str]) -> dict[str, bool]:
