@@ -18,6 +18,11 @@ TModel = TypeVar("TModel", bound=BaseModel)
 
 _MAX_TURNS: int = 25
 _MAX_JSON_RETRIES: int = 2
+_TOKEN_BUDGET_THRESHOLD: int = 400_000
+_CHARS_PER_TOKEN_ESTIMATE: int = 4
+_TOOL_RESULT_OMITTED_PLACEHOLDER: Final[str] = (
+    "file already read, contents omitted"
+)
 _JSON_RETRY_PROMPT: Final[str] = (
     "Your last response was not valid JSON. Respond with ONLY a single valid "
     "JSON object matching the required schema — no prose before or after."
@@ -68,7 +73,11 @@ class BaseAgent(ABC):
         """Run one tool and return its result as text."""
 
     def run(self, user_message: str, output_model: type[TModel]) -> TModel:
-        """Send ``user_message`` through the tool-use loop and validate the answer."""
+        """Send ``user_message`` through the tool-use loop and validate the answer.
+
+        Each call starts a brand-new conversation (``messages`` is empty except
+        for the provided user turn). Prior tool-use transcripts are never reused.
+        """
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": user_message},
         ]
@@ -116,6 +125,7 @@ class BaseAgent(ABC):
 
     def _create_message(self, messages: list[dict[str, Any]]) -> Any:
         """Call Claude through the centralized client."""
+        self._apply_token_budget(messages)
         return call_claude(
             self._client,
             self._model,
@@ -128,6 +138,18 @@ class BaseAgent(ABC):
             agent_name=self._agent_type,
             logger=self._logger,
         )
+
+    def _apply_token_budget(self, messages: list[dict[str, Any]]) -> None:
+        """Trim oldest tool results when the session exceeds the token budget."""
+        while _estimate_input_tokens(messages, self.system_prompt) > _TOKEN_BUDGET_THRESHOLD:
+            if not _trim_oldest_tool_result(messages):
+                break
+            self._logger.warning(
+                "Agent %s trimmed oldest tool_result to stay under token budget "
+                "(estimated input tokens now ~%d)",
+                self._agent_type,
+                _estimate_input_tokens(messages, self.system_prompt),
+            )
 
     def _run_tool_calls(self, response: Any) -> list[dict[str, Any]]:
         """Execute every ``tool_use`` block and build ``tool_result`` payloads."""
@@ -271,3 +293,37 @@ def _extract_json_object(text: str) -> Any:
         if start == -1 or end == -1 or end <= start:
             raise
         return json.loads(stripped[start : end + 1])
+
+
+def _estimate_input_tokens(
+    messages: list[dict[str, Any]],
+    system_prompt: str,
+) -> int:
+    """Return a conservative estimate of input tokens for ``messages``."""
+    payload = json.dumps(
+        {"system": system_prompt, "messages": messages},
+        ensure_ascii=False,
+        default=str,
+    )
+    return max(1, len(payload) // _CHARS_PER_TOKEN_ESTIMATE)
+
+
+def _trim_oldest_tool_result(messages: list[dict[str, Any]]) -> bool:
+    """Replace the oldest large tool_result body with a short placeholder."""
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if block.get("type") != "tool_result":
+                continue
+            body = block.get("content")
+            if not isinstance(body, str):
+                continue
+            if body == _TOOL_RESULT_OMITTED_PLACEHOLDER:
+                continue
+            block["content"] = _TOOL_RESULT_OMITTED_PLACEHOLDER
+            return True
+    return False

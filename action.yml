@@ -32,10 +32,18 @@ runs:
       shell: bash
 
     - name: Run agentic-flow
-      run: |
-        python ${{ github.action_path }}/main.py --event "${{ inputs.event }}" --issue-number "${{ inputs.issue-number }}" --comment-body "${{ inputs.comment-body }}" --comment-author "${{ inputs.comment-author }}"
-      shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         GITHUB_REPO: ${{ github.repository }}
+        COMMENT_BODY: ${{ inputs.comment-body }}
+        ISSUE_NUMBER: ${{ inputs.issue-number }}
+        EVENT_NAME: ${{ inputs.event }}
+        COMMENT_AUTHOR: ${{ inputs.comment-author }}
+      run: |
+        python "${{ github.action_path }}/main.py" \
+          --event "$EVENT_NAME" \
+          --issue-number "$ISSUE_NUMBER" \
+          --comment-body "$COMMENT_BODY" \
+          --comment-author "$COMMENT_AUTHOR"
+      shell: bash

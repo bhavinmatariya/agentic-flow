@@ -71,9 +71,12 @@ class ImplementationOrchestrator:
         history: list[dict[str, Any]] = []
         last_review: ReviewResult | None = None
         last_implementation: ImplementationResult | None = None
-        attempt_failure_notes: list[str] = []
+        last_round_failure_note: str | None = None
 
         for round_index in range(1, self._max_rounds + 1):
+            # Each implement()/review() call starts a fresh BaseAgent.run()
+            # conversation (messages=[]). Cross-round context is limited to the
+            # approved approach plus the prior round's findings/failure note.
             self._logger.info(
                 "Orchestrator round %d/%d for issue #%s",
                 round_index,
@@ -97,6 +100,9 @@ class ImplementationOrchestrator:
             if last_review is not None and last_review.findings:
                 review_findings = list(last_review.findings)
 
+            round_failure_note = last_round_failure_note
+            last_round_failure_note = None
+
             implementation: ImplementationResult | None = None
             try:
                 with implement_ctx:
@@ -107,7 +113,7 @@ class ImplementationOrchestrator:
                         primary_repo,
                         human_approval_text=human_approval_text,
                         review_findings=review_findings,
-                        attempt_failure_notes=attempt_failure_notes or None,
+                        attempt_failure_note=round_failure_note,
                     )
             except Exception as exc:
                 short_error = _short_error(exc)
@@ -118,7 +124,7 @@ class ImplementationOrchestrator:
                     issue_number,
                     short_error,
                 )
-                attempt_failure_notes.append(
+                last_round_failure_note = (
                     f"Your previous attempt failed with: {short_error}. "
                     "Try again, fixing that."
                 )
@@ -150,7 +156,7 @@ class ImplementationOrchestrator:
                     issue_number,
                     short_error,
                 )
-                attempt_failure_notes.append(
+                last_round_failure_note = (
                     f"Your previous attempt failed with: {short_error}. "
                     "Try again, fixing that."
                 )

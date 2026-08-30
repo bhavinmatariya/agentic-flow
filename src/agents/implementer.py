@@ -203,7 +203,7 @@ class ImplementerAgent(BaseAgent):
         *,
         human_approval_text: str | None = None,
         review_findings: list[str] | None = None,
-        attempt_failure_notes: list[str] | None = None,
+        attempt_failure_note: str | None = None,
     ) -> ImplementationResult:
         """Apply ``approach`` on a dedicated branch and return the outcome.
 
@@ -216,7 +216,8 @@ class ImplementerAgent(BaseAgent):
             human_approval_text: Optional human approval comment text.
             review_findings: Exact reviewer findings from the prior round when
                 re-implementing after a failed review.
-            attempt_failure_notes: Prior round failures to recover from.
+            attempt_failure_note: Optional note from the immediately prior round
+                when implement or review raised an error.
 
         Returns:
             Validated implementation metadata including branch and files changed.
@@ -239,7 +240,7 @@ class ImplementerAgent(BaseAgent):
             local_repo_path=local_repo_path,
             human_approval_text=human_approval_text,
             review_findings=review_findings,
-            attempt_failure_notes=attempt_failure_notes,
+            attempt_failure_note=attempt_failure_note,
         )
         result = self.run(user_message, ImplementationResult)
         if result.branch_name != branch_name:
@@ -262,7 +263,7 @@ class ImplementerAgent(BaseAgent):
         local_repo_path: str,
         human_approval_text: str | None = None,
         review_findings: list[str] | None = None,
-        attempt_failure_notes: list[str] | None = None,
+        attempt_failure_note: str | None = None,
     ) -> str:
         """Assemble the user turn from issue, investigation, and approach context."""
         issue_body = str(issue.get("body") or "").strip() or "(empty)"
@@ -304,10 +305,11 @@ class ImplementerAgent(BaseAgent):
                 "code change):\n"
                 f"{json.dumps(review_findings, ensure_ascii=False, indent=2)}\n\n"
             )
-        if attempt_failure_notes:
+        if attempt_failure_note and attempt_failure_note.strip():
             message += (
-                "Previous attempt failures (read carefully and fix before proceeding):\n"
-                f"{json.dumps(attempt_failure_notes, ensure_ascii=False, indent=2)}\n\n"
+                "Previous attempt failure (from the last round only — fix this "
+                "before proceeding):\n"
+                f"{attempt_failure_note.strip()}\n\n"
             )
         message += (
             f"Issue nature:\n{investigation.issue_nature}\n\n"
