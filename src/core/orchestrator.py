@@ -19,6 +19,7 @@ from core.models import (
     Investigation,
     Proposal,
     ReviewResult,
+    ReviewStrategy,
     Subtask,
     SubtaskPlan,
 )
@@ -30,7 +31,7 @@ IN_PROGRESS_LABEL = "agent:in-progress"
 NEEDS_HUMAN_LABEL = "agent:needs-human"
 DONE_LABEL = "agent:done"
 DEFAULT_MAX_ROUNDS = 6
-DEFAULT_MAX_ROUNDS_PER_SUBTASK = 3
+DEFAULT_MAX_ROUNDS_PER_SUBTASK = 5
 
 
 @dataclass
@@ -65,6 +66,7 @@ class ImplementationOrchestrator:
         decomposer: TaskDecomposerAgent,
         *,
         max_rounds_per_subtask: int = DEFAULT_MAX_ROUNDS_PER_SUBTASK,
+        review_strategy: ReviewStrategy = "per_phase",
         logger: logging.Logger | None = None,
     ) -> None:
         """Bind orchestration to adapter and agent instances."""
@@ -73,6 +75,7 @@ class ImplementationOrchestrator:
         self._reviewer = reviewer
         self._decomposer = decomposer
         self._max_rounds_per_subtask = max(1, max_rounds_per_subtask)
+        self._review_strategy: ReviewStrategy = review_strategy
         self._logger = logger or get_logger(__name__)
 
     def run(
@@ -89,6 +92,9 @@ class ImplementationOrchestrator:
         subtask_plan: SubtaskPlan | None = None,
         start_subtask_index: int = 0,
         checkpoint_completed: int | None = None,
+        resume_stall_findings: list[str] | None = None,
+        resume_stall_summary: str | None = None,
+        resume_stall_files: list[str] | None = None,
         reporter: RunReporter | None = None,
     ) -> OrchestratorResult:
         """Decompose, implement each subtask, review, and open a PR when complete."""
@@ -140,7 +146,15 @@ class ImplementationOrchestrator:
                 )
 
         total_subtasks = len(subtask_plan.subtasks)
-        checkpoint_budget = total_subtasks * self._max_rounds_per_subtask * 2
+        subtask_plan = _normalize_subtask_phases(subtask_plan)
+        review_groups = _build_review_groups(subtask_plan, self._review_strategy)
+        if self._review_strategy == "per_subtask":
+            checkpoint_budget = total_subtasks * self._max_rounds_per_subtask * 2
+        else:
+            checkpoint_budget = (
+                total_subtasks * self._max_rounds_per_subtask
+                + len(review_groups) * self._max_rounds_per_subtask * 2
+            )
         if reporter is not None:
             resume_at = checkpoint_completed
             if resume_at is None and start_subtask_index > 0:
@@ -159,47 +173,197 @@ class ImplementationOrchestrator:
         combined_summaries: list[str] = []
         last_review: ReviewResult | None = None
         last_implementation: ImplementationResult | None = None
+        resume_active = bool(
+            resume_stall_findings or resume_stall_summary or resume_stall_files
+        )
 
-        for subtask_index in range(max(0, start_subtask_index), total_subtasks):
-            subtask = subtask_plan.subtasks[subtask_index]
-            is_final = subtask_index == total_subtasks - 1
+        for phase_name, group_items in review_groups:
+            pending = [
+                (index, subtask)
+                for index, subtask in group_items
+                if index >= start_subtask_index
+            ]
+            if not pending:
+                continue
+
+            phase_files: list[str] = []
+            phase_summaries: list[str] = []
             self._logger.info(
-                "Orchestrator subtask %d/%d for issue #%s: %r",
-                subtask_index + 1,
-                total_subtasks,
+                "Review group %r for issue #%s: %d subtask(s) (%s mode)",
+                phase_name,
                 issue_number,
-                subtask.name,
+                len(pending),
+                self._review_strategy,
             )
 
-            outcome = self._run_subtask(
+            for subtask_index, subtask in pending:
+                is_final = subtask_index == total_subtasks - 1
+                self._logger.info(
+                    "Orchestrator subtask %d/%d for issue #%s: %r",
+                    subtask_index + 1,
+                    total_subtasks,
+                    issue_number,
+                    subtask.name,
+                )
+                run_mode = (
+                    "full"
+                    if self._review_strategy == "per_subtask"
+                    else "implement_only"
+                )
+                outcome = self._run_subtask(
+                    issue=issue,
+                    investigation=investigation,
+                    approach=approach,
+                    primary_repo=primary_repo,
+                    issue_number=issue_number,
+                    subtask=subtask,
+                    subtask_index=subtask_index + 1,
+                    subtask_total=total_subtasks,
+                    is_final_subtask=is_final,
+                    human_approval_text=human_approval_text,
+                    existing_branch=branch_name,
+                    repo_session=repo_session,
+                    history=history,
+                    reporter=reporter,
+                    run_mode=run_mode,
+                    initial_review_findings=(
+                        resume_stall_findings
+                        if resume_active and subtask_index == start_subtask_index
+                        else None
+                    ),
+                    initial_attempt_note=(
+                        resume_stall_summary
+                        if resume_active and subtask_index == start_subtask_index
+                        else None
+                    ),
+                    initial_baseline_files=(
+                        resume_stall_files
+                        if resume_active and subtask_index == start_subtask_index
+                        else None
+                    ),
+                )
+                resume_active = False
+                resume_stall_findings = None
+                resume_stall_summary = None
+                resume_stall_files = None
+
+                if not outcome.passed:
+                    diagnostic = self._build_diagnostic_comment(
+                        issue=issue,
+                        approach=approach,
+                        history=history,
+                        reason=outcome.failure_reason or "Subtask implementation stalled.",
+                        last_review=outcome.review_result,
+                        subtask_plan=subtask_plan,
+                        subtask_index=subtask_index,
+                    )
+                    self._mark_needs_human(issue_number, diagnostic)
+                    self._persist_state(
+                        issue_number=issue_number,
+                        branch=branch_name,
+                        investigation=investigation,
+                        approach=approach,
+                        proposal=proposal,
+                        subtask_plan=subtask_plan,
+                        subtask_index=subtask_index,
+                        reporter=reporter,
+                        stall_findings=(
+                            list(outcome.review_result.findings)
+                            if outcome.review_result and outcome.review_result.findings
+                            else None
+                        ),
+                        stall_summary=(
+                            outcome.review_result.summary if outcome.review_result else None
+                        ),
+                        stall_files=(
+                            list(outcome.implementation_result.files_changed)
+                            if outcome.implementation_result
+                            and outcome.implementation_result.files_changed
+                            else None
+                        ),
+                    )
+                    return OrchestratorResult(
+                        passed=False,
+                        review_result=outcome.review_result,
+                        implementation_result=outcome.implementation_result,
+                        diagnostic_comment=diagnostic,
+                        round_history=history,
+                        subtask_plan=subtask_plan,
+                    )
+
+                if outcome.implementation_result is not None:
+                    for path in outcome.implementation_result.files_changed:
+                        if path not in combined_files:
+                            combined_files.append(path)
+                        if path not in phase_files:
+                            phase_files.append(path)
+                    phase_summaries.append(
+                        f"**{subtask.name}:** {outcome.implementation_result.summary}"
+                    )
+                    combined_summaries.append(
+                        f"**{subtask.name}:** {outcome.implementation_result.summary}"
+                    )
+                    last_implementation = outcome.implementation_result
+
+                self._persist_state(
+                    issue_number=issue_number,
+                    branch=branch_name,
+                    investigation=investigation,
+                    approach=approach,
+                    proposal=proposal,
+                    subtask_plan=subtask_plan,
+                    subtask_index=subtask_index + 1,
+                    reporter=reporter,
+                )
+
+            if self._review_strategy == "per_subtask":
+                last_review = outcome.review_result
+                continue
+
+            phase_impl = ImplementationResult(
+                branch_name=branch_name,
+                files_changed=sorted(set(phase_files)),
+                summary="\n\n".join(phase_summaries) or f"{phase_name} phase work",
+            )
+            review_subtask = _phase_review_subtask(phase_name, group_items)
+            last_index = pending[-1][0]
+            review_outcome = self._run_subtask(
                 issue=issue,
                 investigation=investigation,
                 approach=approach,
                 primary_repo=primary_repo,
                 issue_number=issue_number,
-                subtask=subtask,
-                subtask_index=subtask_index + 1,
+                subtask=review_subtask,
+                subtask_index=last_index + 1,
                 subtask_total=total_subtasks,
-                is_final_subtask=is_final,
+                is_final_subtask=last_index == total_subtasks - 1,
                 human_approval_text=human_approval_text,
                 existing_branch=branch_name,
                 repo_session=repo_session,
                 history=history,
                 reporter=reporter,
+                run_mode="full",
+                initial_baseline_files=list(phase_impl.files_changed),
+                initial_attempt_note=(
+                    f"Review the completed {phase_name!r} phase holistically. "
+                    "Fix any findings across the files listed in files_changed."
+                ),
             )
+            last_review = review_outcome.review_result
+            last_implementation = phase_impl
 
-            last_review = outcome.review_result
-            last_implementation = outcome.implementation_result
-
-            if not outcome.passed:
+            if not review_outcome.passed:
                 diagnostic = self._build_diagnostic_comment(
                     issue=issue,
                     approach=approach,
                     history=history,
-                    reason=outcome.failure_reason or "Subtask implementation stalled.",
+                    reason=(
+                        review_outcome.failure_reason
+                        or f"Review failed for {phase_name!r} phase."
+                    ),
                     last_review=last_review,
                     subtask_plan=subtask_plan,
-                    subtask_index=subtask_index,
+                    subtask_index=last_index,
                 )
                 self._mark_needs_human(issue_number, diagnostic)
                 self._persist_state(
@@ -209,36 +373,24 @@ class ImplementationOrchestrator:
                     approach=approach,
                     proposal=proposal,
                     subtask_plan=subtask_plan,
-                    subtask_index=subtask_index,
+                    subtask_index=last_index,
                     reporter=reporter,
+                    stall_findings=(
+                        list(last_review.findings)
+                        if last_review and last_review.findings
+                        else None
+                    ),
+                    stall_summary=last_review.summary if last_review else None,
+                    stall_files=list(phase_impl.files_changed) if phase_impl.files_changed else None,
                 )
                 return OrchestratorResult(
                     passed=False,
                     review_result=last_review,
-                    implementation_result=last_implementation,
+                    implementation_result=phase_impl,
                     diagnostic_comment=diagnostic,
                     round_history=history,
                     subtask_plan=subtask_plan,
                 )
-
-            if outcome.implementation_result is not None:
-                for path in outcome.implementation_result.files_changed:
-                    if path not in combined_files:
-                        combined_files.append(path)
-                combined_summaries.append(
-                    f"**{subtask.name}:** {outcome.implementation_result.summary}"
-                )
-
-            self._persist_state(
-                issue_number=issue_number,
-                branch=branch_name,
-                investigation=investigation,
-                approach=approach,
-                proposal=proposal,
-                subtask_plan=subtask_plan,
-                subtask_index=subtask_index + 1,
-                reporter=reporter,
-            )
 
         if last_implementation is None or last_review is None:
             raise AgentError("Orchestrator completed subtasks without implementation output.")
@@ -311,13 +463,42 @@ class ImplementationOrchestrator:
         repo_session: RepositorySession,
         history: list[dict[str, Any]],
         reporter: RunReporter | None,
+        initial_review_findings: list[str] | None = None,
+        initial_attempt_note: str | None = None,
+        initial_baseline_files: list[str] | None = None,
+        run_mode: str = "full",
     ) -> _SubtaskOutcome:
         """Run implement/review rounds for a single subtask."""
+        implement_only = run_mode == "implement_only"
         last_review: ReviewResult | None = None
         last_implementation: ImplementationResult | None = None
         baseline_implementation: ImplementationResult | None = None
-        last_round_failure_note: str | None = None
+        last_round_failure_note: str | None = initial_attempt_note
         last_review_failed: bool = False
+        seeded_findings = list(initial_review_findings) if initial_review_findings else None
+
+        if initial_baseline_files:
+            existing = [
+                path
+                for path in initial_baseline_files
+                if self._implementer.files_exist_on_branch(
+                    primary_repo,
+                    existing_branch,
+                    [path],
+                )
+            ]
+            if existing:
+                baseline_implementation = ImplementationResult(
+                    branch_name=existing_branch,
+                    files_changed=sorted(set(existing)),
+                    summary="Restored from prior commits on resume.",
+                )
+                self._logger.info(
+                    "Resume baseline for subtask %d/%d: %d file(s) on branch",
+                    subtask_index,
+                    subtask_total,
+                    len(existing),
+                )
 
         for round_index in range(1, self._max_rounds_per_subtask + 1):
             self._logger.info(
@@ -338,6 +519,10 @@ class ImplementationOrchestrator:
             ):
                 review_findings = list(last_review.findings)
                 phantom_findings = _findings_indicate_phantom_implement(review_findings)
+            elif round_index == 1 and seeded_findings:
+                review_findings = list(seeded_findings)
+                phantom_findings = _findings_indicate_phantom_implement(review_findings)
+                seeded_findings = None
 
             round_failure_note = last_round_failure_note
             prior_review_failed = last_review_failed
@@ -476,7 +661,9 @@ class ImplementationOrchestrator:
                         repo_session=repo_session,
                         baseline_implementation=baseline_implementation,
                         require_fresh_commits=(
-                            round_index == 1 and not baseline_verified
+                            round_index == 1
+                            and not baseline_verified
+                            and not review_findings
                         )
                         or phantom_findings,
                     )
@@ -585,6 +772,22 @@ class ImplementationOrchestrator:
                 baseline_implementation = _merge_implementation_results(
                     baseline_implementation,
                     implementation,
+                )
+
+            if implement_only:
+                last_implementation = implementation
+                history.append(
+                    {
+                        "subtask": subtask.name,
+                        "subtask_index": subtask_index,
+                        "round": round_index,
+                        "stage": "implement_only",
+                        "implementation_summary": implementation.summary,
+                    }
+                )
+                return _SubtaskOutcome(
+                    passed=True,
+                    implementation_result=implementation,
                 )
 
             try:
@@ -723,6 +926,9 @@ class ImplementationOrchestrator:
         subtask_plan: SubtaskPlan,
         subtask_index: int,
         reporter: RunReporter | None = None,
+        stall_findings: list[str] | None = None,
+        stall_summary: str | None = None,
+        stall_files: list[str] | None = None,
     ) -> None:
         """Post hidden state so resume can continue from the next subtask."""
         checkpoint_completed = reporter.checkpoint_index if reporter is not None else None
@@ -736,6 +942,9 @@ class ImplementationOrchestrator:
                 subtask_plan=subtask_plan,
                 subtask_index=subtask_index,
                 checkpoint_completed=checkpoint_completed,
+                stall_findings=stall_findings,
+                stall_summary=stall_summary,
+                stall_files=stall_files,
             ),
         )
 
@@ -913,6 +1122,71 @@ def resolve_approach(proposal_approaches: list[Approach], selected: str | None) 
             return approach
 
     return proposal_approaches[0]
+
+
+def _normalize_subtask_phases(plan: SubtaskPlan) -> SubtaskPlan:
+    """Infer review phases when older plans only used the default 'general' group."""
+    if any(subtask.review_phase != "general" for subtask in plan.subtasks):
+        return plan
+    updated = [
+        subtask.model_copy(update={"review_phase": _infer_review_phase(subtask)})
+        for subtask in plan.subtasks
+    ]
+    return plan.model_copy(update={"subtasks": updated})
+
+
+def _infer_review_phase(subtask: Subtask) -> str:
+    """Guess a review phase from subtask text when the decomposer omitted it."""
+    text = f"{subtask.name} {subtask.scope} {subtask.description}".lower()
+    if any(token in text for token in ("frontend", "react", "next", "ui", "page.tsx", "component")):
+        return "frontend"
+    if any(token in text for token in ("prisma", "database", "schema", "migration", "sqlite", "sql")):
+        return "database"
+    if any(token in text for token in ("backend", "api", "route", "express", "middleware", "controller")):
+        return "backend"
+    if any(token in text for token in ("docker", "ci", "config", "env", "infra", "tooling")):
+        return "infra"
+    return "general"
+
+
+def _build_review_groups(
+    plan: SubtaskPlan,
+    strategy: ReviewStrategy,
+) -> list[tuple[str, list[tuple[int, Subtask]]]]:
+    """Group subtasks for batched review according to ``strategy``."""
+    if strategy == "end_only":
+        return [("all", list(enumerate(plan.subtasks)))]
+    if strategy == "per_subtask":
+        return [(f"subtask-{index}", [(index, subtask)]) for index, subtask in enumerate(plan.subtasks)]
+
+    groups: dict[str, list[tuple[int, Subtask]]] = {}
+    order: list[str] = []
+    for index, subtask in enumerate(plan.subtasks):
+        phase = subtask.review_phase
+        if phase not in groups:
+            groups[phase] = []
+            order.append(phase)
+        groups[phase].append((index, subtask))
+    return [(phase, groups[phase]) for phase in order]
+
+
+def _phase_review_subtask(
+    phase_name: str,
+    items: list[tuple[int, Subtask]],
+) -> Subtask:
+    """Build a synthetic subtask representing a whole review phase."""
+    names = ", ".join(subtask.name for _, subtask in items)
+    last = items[-1][1]
+    return Subtask(
+        name=f"{phase_name} phase review",
+        description=(
+            f"Review all completed work in the {phase_name!r} phase: {names}. "
+            "Fix any issues across these files before moving to the next phase."
+        ),
+        scope=f"{phase_name} layer ({len(items)} subtask(s))",
+        order=last.order,
+        review_phase=last.review_phase,
+    )
 
 
 def _short_error(exc: BaseException) -> str:

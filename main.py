@@ -41,6 +41,7 @@ from core.pipeline_state import (
     parse_state_comment,
 )
 from core.orchestrator import (
+    DEFAULT_MAX_ROUNDS_PER_SUBTASK,
     DONE_LABEL,
     IN_PROGRESS_LABEL,
     NEEDS_HUMAN_LABEL,
@@ -311,7 +312,11 @@ def _build_pipeline_agents(
     )
     decomposer = TaskDecomposerAgent(client, model, settings)
     orchestrator = ImplementationOrchestrator(
-        adapter, implementer, reviewer, decomposer
+        adapter,
+        implementer,
+        reviewer,
+        decomposer,
+        review_strategy=settings.review_strategy,
     )
 
     return _PipelineAgents(
@@ -625,11 +630,17 @@ def _handle_resume(
         )
         if state.checkpoint_completed is not None:
             total_checkpoints = (
-                len(state.subtask_plan.subtasks) * 3 * 2
+                len(state.subtask_plan.subtasks) * DEFAULT_MAX_ROUNDS_PER_SUBTASK * 2
             )
             resume_note += (
                 f"\n\nProgress checkpoint **{state.checkpoint_completed}/"
                 f"{total_checkpoints}** from the previous run."
+            )
+        if state.stall_findings:
+            resume_note += (
+                f"\n\nCarrying forward **{len(state.stall_findings)}** reviewer "
+                "finding(s) from the last attempt — the agent will continue fixing "
+                "those before moving on."
             )
     adapter.post_comment(issue_number, resume_note)
 
@@ -664,6 +675,9 @@ def _handle_resume(
                 subtask_plan=state.subtask_plan,
                 start_subtask_index=state.subtask_index,
                 checkpoint_completed=state.checkpoint_completed,
+                resume_stall_findings=state.stall_findings,
+                resume_stall_summary=state.stall_summary,
+                resume_stall_files=state.stall_files,
                 reporter=reporter,
             )
 

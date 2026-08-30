@@ -31,6 +31,9 @@ class PipelineState:
     subtask_plan: SubtaskPlan | None = None
     subtask_index: int = 0
     checkpoint_completed: int | None = None
+    stall_findings: list[str] | None = None
+    stall_summary: str | None = None
+    stall_files: list[str] | None = None
     resume_mode: str | None = None
 
 
@@ -43,6 +46,9 @@ def format_state_comment(
     subtask_plan: SubtaskPlan | None = None,
     subtask_index: int | None = None,
     checkpoint_completed: int | None = None,
+    stall_findings: list[str] | None = None,
+    stall_summary: str | None = None,
+    stall_files: list[str] | None = None,
     resume_mode: str | None = None,
 ) -> str:
     """Build a hidden state payload comment."""
@@ -61,6 +67,12 @@ def format_state_comment(
         payload["subtask_index"] = subtask_index
     if checkpoint_completed is not None:
         payload["checkpoint_completed"] = max(0, int(checkpoint_completed))
+    if stall_findings:
+        payload["stall_findings"] = list(stall_findings)
+    if stall_summary:
+        payload["stall_summary"] = stall_summary.strip()
+    if stall_files:
+        payload["stall_files"] = list(stall_files)
     return f"<!-- {STATE_MARKER}\n{json.dumps(payload, ensure_ascii=False)}\n-->"
 
 
@@ -95,6 +107,15 @@ def parse_state_comment(body: str) -> PipelineState:
     checkpoint_completed: int | None = None
     if "checkpoint_completed" in payload:
         checkpoint_completed = max(0, int(payload.get("checkpoint_completed") or 0))
+    stall_findings: list[str] | None = None
+    raw_stall_findings = payload.get("stall_findings")
+    if isinstance(raw_stall_findings, list):
+        stall_findings = [str(item) for item in raw_stall_findings if str(item).strip()]
+    stall_summary = str(payload.get("stall_summary") or "").strip() or None
+    stall_files: list[str] | None = None
+    raw_stall_files = payload.get("stall_files")
+    if isinstance(raw_stall_files, list):
+        stall_files = [str(item) for item in raw_stall_files if str(item).strip()]
     try:
         if payload.get("investigation") is not None:
             investigation = Investigation.model_validate(payload.get("investigation"))
@@ -118,6 +139,9 @@ def parse_state_comment(body: str) -> PipelineState:
         subtask_plan=subtask_plan,
         subtask_index=max(0, subtask_index),
         checkpoint_completed=checkpoint_completed,
+        stall_findings=stall_findings,
+        stall_summary=stall_summary,
+        stall_files=stall_files,
         resume_mode=str(resume_mode) if resume_mode else None,
     )
 
@@ -155,6 +179,7 @@ def format_subtask_plan_comment(plan: SubtaskPlan, approach_name: str) -> str:
                 subtask.description,
                 "",
                 f"**Scope:** {subtask.scope}",
+                f"**Review phase:** {subtask.review_phase}",
                 "",
             ]
         )

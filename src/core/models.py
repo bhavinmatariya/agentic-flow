@@ -6,7 +6,7 @@ of one of these models so values are validated and typed rather than raw dicts.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -177,6 +177,9 @@ class Proposal(BaseModel):
     approaches: list[Approach] = Field(..., min_length=1)
 
 
+ReviewPhase = Literal["database", "backend", "frontend", "infra", "general"]
+
+
 class Subtask(BaseModel):
     """One ordered slice of an approved approach for sequential implementation.
 
@@ -185,6 +188,7 @@ class Subtask(BaseModel):
         description: What to implement in this step only.
         scope: Rough touch-area estimate (files/layers), kept small.
         order: 1-based execution order.
+        review_phase: Layer/group used for batched review (backend, frontend, etc.).
     """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -193,8 +197,10 @@ class Subtask(BaseModel):
     description: str = Field(..., min_length=1)
     scope: str = Field(..., min_length=1)
     order: int = Field(..., ge=1)
+    review_phase: ReviewPhase = "general"
 
 
+ReviewStrategy = Literal["per_subtask", "per_phase", "end_only"]
 MAX_SUBTASKS = 8
 RECOMMENDED_MAX_SUBTASKS = 5
 

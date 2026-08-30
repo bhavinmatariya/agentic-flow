@@ -5,7 +5,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from typing import Literal
+
 from dotenv import load_dotenv
+
+ReviewStrategy = Literal["per_subtask", "per_phase", "end_only"]
 
 
 class ConfigurationError(Exception):
@@ -53,6 +57,7 @@ class Settings:
     reviewer_live_effort: str
     anthropic_fallback_model: str | None
     live_verification_enabled: bool
+    review_strategy: ReviewStrategy
 
     @classmethod
     def from_env(cls, *, env_file: str | None = ".env") -> Settings:
@@ -97,6 +102,7 @@ class Settings:
                 "claude-sonnet-4-20250514",
             ),
             live_verification_enabled=_env_bool("LIVE_VERIFICATION_ENABLED", False),
+            review_strategy=_review_strategy_from_env(),
         )
 
     def agent_config(self, agent_type: str) -> AgentClaudeConfig:
@@ -183,3 +189,13 @@ def _env_bool(key: str, default: bool) -> bool:
     raise ConfigurationError(
         f"{key} must be a boolean (true/false, 1/0, yes/no), got: {raw!r}"
     )
+
+
+def _review_strategy_from_env() -> ReviewStrategy:
+    raw = os.getenv("REVIEW_STRATEGY", "per_phase").strip().lower()
+    allowed = {"per_subtask", "per_phase", "end_only"}
+    if raw not in allowed:
+        raise ConfigurationError(
+            f"REVIEW_STRATEGY must be one of {sorted(allowed)}, got: {raw!r}"
+        )
+    return raw  # type: ignore[return-value]

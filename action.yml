@@ -72,6 +72,7 @@ runs:
         COMMENT_AUTHOR: ${{ inputs.comment-author }}
         LIVE_VERIFICATION_ENABLED: ${{ inputs.live-verification-enabled }}
         ANTHROPIC_FALLBACK_MODEL: claude-sonnet-4-20250514
+        REVIEW_STRATEGY: per_phase
       run: |
         python "${{ github.action_path }}/main.py" \
           --event "$EVENT_NAME" \

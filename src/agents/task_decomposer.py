@@ -25,9 +25,15 @@ TASK_DECOMPOSER_SYSTEM_PROMPT: Final[str] = (
     "- Use 1 subtask when the approved approach is already small (~one file or "
     "a trivial change). Use 2–5 subtasks for larger features. Never exceed 5.\n"
     "- Keep each description concrete and scoped. scope: a short phrase "
-    "(e.g. '~2 files, backend routes only').\n\n"
+    "(e.g. '~2 files, backend routes only').\n"
+    "- Set review_phase on each subtask to group batched reviews: "
+    "'database' (schema/migrations), 'backend' (API/server), "
+    "'frontend' (UI/pages), 'infra' (config/tooling), or 'general'.\n"
+    "- Order subtasks so all 'database' steps come before 'backend', "
+    "then 'frontend', when the approach spans multiple layers.\n\n"
     "Respond with ONLY JSON: "
-    '{"subtasks": [{"name": str, "description": str, "scope": str, "order": int}]}'
+    '{"subtasks": [{"name": str, "description": str, "scope": str, "order": int, '
+    '"review_phase": "database"|"backend"|"frontend"|"infra"|"general"}]}'
 )
 
 
