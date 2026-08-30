@@ -1,15 +1,22 @@
 # Example workflow for consumer repos (e.g. Test-Adbee).
 # Triggers the agentic-flow reusable action when someone comments on an issue.
+#
+# Bot comments (subtask plan, diagnostics, state markers) must NOT start new runs.
+# The job `if:` skips them before checkout/install; main.py also noops as backup.
 name: Agent on issue comment
 
 on:
   issue_comment:
     types: [created]
 
+concurrency:
+  group: agentic-flow-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
   agent:
     if: >
-      github.event_name != 'issue_comment' ||
+      github.event.comment.user.type != 'Bot' &&
       !contains(github.event.comment.body, 'agentic-flow:auto')
     runs-on: ubuntu-latest
     permissions:

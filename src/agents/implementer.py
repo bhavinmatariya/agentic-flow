@@ -48,7 +48,12 @@ IMPLEMENTER_SYSTEM_PROMPT: Final[str] = (
     "leaving both in place and hoping yours wins.\n"
     "9. When a CURRENT SUBTASK block is provided, implement ONLY that subtask. "
     "Do not implement later subtasks or out-of-scope parts of the full "
-    "approach in this session.\n\n"
+    "approach in this session.\n"
+    "10. Every path in files_changed MUST be committed on GitHub via a "
+    "successful edit_file call in this session before you return final JSON. "
+    "Never claim a file was added or changed without a successful edit_file "
+    "response {\"status\": \"committed\"}. If edit_file returns an error, fix "
+    "and retry — do not return success JSON anyway.\n\n"
     "When finished, respond with ONLY JSON: {\"branch_name\": str, "
     "\"files_changed\": [str], \"summary\": str}"
 )
@@ -196,6 +201,9 @@ class ImplementerAgent(BaseAgent):
             raise AgentError("github_token must not be empty")
         self.system_prompt = IMPLEMENTER_SYSTEM_PROMPT
         self.tool_definitions = list(IMPLEMENTER_TOOL_DEFINITIONS)
+        self._committed_paths: set[str] = set()
+        self._working_repo: str = ""
+        self._working_branch: str = ""
 
     def implement(
         self,
@@ -254,6 +262,9 @@ class ImplementerAgent(BaseAgent):
         if subtask_index is not None and subtask_total is not None:
             session_parts.append(f"subtask {subtask_index}/{subtask_total}")
         self._run_session_label = " · ".join(session_parts)
+        self._committed_paths = set()
+        self._working_repo = primary_repo
+        self._working_branch = branch_name
         try:
             local_repo_path = self._code_search.clone_repo(
                 primary_repo,
@@ -281,9 +292,16 @@ class ImplementerAgent(BaseAgent):
                     branch_name,
                 )
                 result = result.model_copy(update={"branch_name": branch_name})
-            return result
+            return self._validate_implementation(
+                result,
+                review_findings=review_findings,
+                subtask=subtask,
+            )
         finally:
             self._run_session_label = None
+            self._committed_paths = set()
+            self._working_repo = ""
+            self._working_branch = ""
 
     def _build_user_message(
         self,
@@ -404,15 +422,20 @@ class ImplementerAgent(BaseAgent):
                 )
 
             if tool_name == "edit_file":
+                path = _normalize_repo_path(_require_str(tool_input, "path"))
                 self._code_edit.edit_file(
                     _require_str(tool_input, "repo"),
                     _require_str(tool_input, "branch"),
-                    _require_str(tool_input, "path"),
+                    path,
                     _require_str(tool_input, "old_string"),
                     tool_input.get("new_string", ""),
                     _require_str(tool_input, "commit_message"),
                 )
-                return json.dumps({"status": "committed"}, ensure_ascii=False)
+                self._committed_paths.add(path)
+                return json.dumps(
+                    {"status": "committed", "path": path},
+                    ensure_ascii=False,
+                )
         except ToolError as exc:
             return json.dumps(
                 {"error": f"{type(exc).__name__}: {exc}"},
@@ -423,6 +446,62 @@ class ImplementerAgent(BaseAgent):
             {"error": f"Unknown tool: {tool_name!r}"},
             ensure_ascii=False,
         )
+
+    def _validate_implementation(
+        self,
+        result: ImplementationResult,
+        *,
+        review_findings: list[str] | None,
+        subtask: Subtask | None,
+    ) -> ImplementationResult:
+        """Ensure claimed files exist on GitHub and commits match reality."""
+        repo = self._working_repo
+        branch = self._working_branch
+        if not repo or not branch:
+            return result
+
+        claimed = [_normalize_repo_path(path) for path in result.files_changed]
+        missing = [
+            path
+            for path in claimed
+            if not self._code_edit.file_exists_on_branch(repo, branch, path)
+        ]
+        if missing:
+            raise AgentError(
+                "Implementation JSON lists file(s) not present on GitHub branch "
+                f"{branch!r}: {missing}. Call edit_file until each path returns "
+                '{"status": "committed"} before returning final JSON.'
+            )
+
+        if review_findings and not self._committed_paths:
+            raise AgentError(
+                "Reviewer findings require code changes but no successful edit_file "
+                "commit was made this session. Address each finding with edit_file."
+            )
+
+        if (
+            subtask is not None
+            and not claimed
+            and not self._committed_paths
+            and review_findings
+        ):
+            raise AgentError(
+                f"Subtask {subtask.name!r} still has open reviewer findings but "
+                "no edit_file commit was made. Fix each finding with edit_file."
+            )
+
+        if self._committed_paths:
+            merged_paths = sorted(set(claimed) | self._committed_paths)
+            if set(merged_paths) != set(result.files_changed):
+                result = result.model_copy(update={"files_changed": merged_paths})
+        elif claimed:
+            result = result.model_copy(update={"files_changed": sorted(set(claimed))})
+        return result
+
+
+def _normalize_repo_path(path: str) -> str:
+    """Normalize a repository-relative path."""
+    return path.replace("\\", "/").lstrip("/")
 
 
 def _require_str(tool_input: dict[str, Any], key: str) -> str:

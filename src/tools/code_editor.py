@@ -242,6 +242,17 @@ class CodeEditTool:
                 f"Cannot commit to {repo!r}; adapter is bound to {configured_repo!r}"
             )
 
+    def file_exists_on_branch(self, repo: str, branch: str, path: str) -> bool:
+        """Return True when ``path`` exists on ``branch`` in ``repo``."""
+        normalized_path = path.replace("\\", "/").lstrip("/")
+        if not normalized_path:
+            return False
+        try:
+            self._adapter.get_file_content(repo, normalized_path, branch)
+            return True
+        except AdapterError:
+            return False
+
 
 def _is_new_file_edit(old_string: str) -> bool:
     """Return True when ``edit_file`` should create a file instead of patching."""

@@ -19,19 +19,45 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    - name: Skip bot echo comments (fast exit)
+      if: >
+        inputs.event == 'issue_comment' &&
+        (contains(inputs.comment-body, 'agentic-flow:auto') ||
+         inputs.comment-author == 'github-actions[bot]')
+      run: |
+        echo "Skipping agentic-flow: triggered by the agent's own comment (anti-loop)."
+        exit 0
+      shell: bash
+
     - uses: actions/setup-python@v5
+      if: >
+        inputs.event != 'issue_comment' ||
+        (!contains(inputs.comment-body, 'agentic-flow:auto') &&
+         inputs.comment-author != 'github-actions[bot]')
       with:
         python-version: '3.11'
 
     - name: Install Python dependencies
+      if: >
+        inputs.event != 'issue_comment' ||
+        (!contains(inputs.comment-body, 'agentic-flow:auto') &&
+         inputs.comment-author != 'github-actions[bot]')
       run: pip install -r ${{ github.action_path }}/requirements.txt
       shell: bash
 
     - name: Install Playwright browser
+      if: >
+        inputs.event != 'issue_comment' ||
+        (!contains(inputs.comment-body, 'agentic-flow:auto') &&
+         inputs.comment-author != 'github-actions[bot]')
       run: python -m playwright install --with-deps chromium
       shell: bash
 
     - name: Run agentic-flow
+      if: >
+        inputs.event != 'issue_comment' ||
+        (!contains(inputs.comment-body, 'agentic-flow:auto') &&
+         inputs.comment-author != 'github-actions[bot]')
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
         GITHUB_TOKEN: ${{ inputs.github-token }}

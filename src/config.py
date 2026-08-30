@@ -25,7 +25,7 @@ _AGENT_DEFAULTS: dict[str, AgentClaudeConfig] = {
     "investigator": AgentClaudeConfig(effort="xhigh", temperature=0.0, max_tokens=16000),
     "proposer": AgentClaudeConfig(effort="high", temperature=0.0, max_tokens=8000),
     "response_parser": AgentClaudeConfig(effort="low", temperature=0.0, max_tokens=2000),
-    "implementer": AgentClaudeConfig(effort="xhigh", temperature=0.0, max_tokens=16000),
+    "implementer": AgentClaudeConfig(effort="high", temperature=0.0, max_tokens=16000),
     "reviewer": AgentClaudeConfig(effort="medium", temperature=0.0, max_tokens=8000),
     "task_decomposer": AgentClaudeConfig(effort="high", temperature=0.0, max_tokens=8000),
 }

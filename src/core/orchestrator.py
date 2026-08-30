@@ -420,7 +420,7 @@ class ImplementationOrchestrator:
                     review_result=review,
                 )
 
-            if not review.making_progress:
+            if not review.making_progress and round_index >= self._max_rounds_per_subtask:
                 return _SubtaskOutcome(
                     passed=False,
                     implementation_result=implementation,
@@ -430,6 +430,12 @@ class ImplementationOrchestrator:
                         "stalled: reviewer set making_progress=false."
                     ),
                 )
+            if not review.making_progress:
+                last_round_failure_note = (
+                    "Reviewer set making_progress=false. "
+                    f"Findings: {'; '.join(review.findings) if review.findings else review.summary}"
+                )
+                continue
 
         return _SubtaskOutcome(
             passed=False,

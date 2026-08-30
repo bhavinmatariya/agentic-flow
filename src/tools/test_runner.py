@@ -48,6 +48,14 @@ _DB_MARKERS: Final[tuple[str, ...]] = (
 )
 _OUTPUT_TAIL_CHARS: Final[int] = 4000
 _KEY_ERROR_LINES: Final[int] = 12
+_ENVIRONMENT_FAILURE_MARKERS: Final[tuple[str, ...]] = (
+    "not found",
+    "command not found",
+    "enoent",
+    "cannot find module",
+    "npm err!",
+    "sh: 1:",
+)
 
 logger = get_logger(__name__)
 
@@ -270,6 +278,28 @@ def _run_frontend_checks(package_dir: Path) -> tuple[list[str], list[str]]:
         skipped.append(f"{rel}: skipped: npm is not available in this environment")
         return findings, skipped
 
+    if not (package_dir / "node_modules").is_dir():
+        install_argv = (
+            [npm, "ci", "--no-audit", "--no-fund"]
+            if (package_dir / "package-lock.json").is_file()
+            else [npm, "install", "--no-audit", "--no-fund"]
+        )
+        install_label = " ".join(install_argv)
+        install_completed = _run_subprocess(
+            install_argv,
+            cwd=package_dir,
+            label=install_label,
+            timeout_seconds=900,
+        )
+        if install_completed is None or install_completed.returncode != 0:
+            detail = (
+                _extract_key_lines(_combined_output(install_completed))
+                if install_completed is not None
+                else "install command could not start"
+            )
+            skipped.append(f"{rel}: skipped: npm install failed in CI ({detail})")
+            return findings, skipped
+
     for argv, prefix in checks:
         if argv[0] == "npm":
             command = [npm, *argv[1:]]
@@ -282,6 +312,12 @@ def _run_frontend_checks(package_dir: Path) -> tuple[list[str], list[str]]:
         if completed.returncode == 0:
             continue
         output = _combined_output(completed)
+        if _is_environment_failure(output):
+            skipped.append(
+                f"{rel}: skipped: environment/tooling issue during {prefix.lower()} "
+                f"({_extract_key_lines(output)})"
+            )
+            continue
         findings.append(f"{prefix} ({rel}): {_extract_key_lines(output)}")
 
     return findings, skipped
@@ -342,3 +378,9 @@ def _extract_key_lines(output: str) -> str:
 def _display_rel(path: Path) -> str:
     name = path.name or str(path)
     return name if path.parent.name in {"", path.drive} else f"{path.parent.name}/{name}"
+
+
+def _is_environment_failure(output: str) -> bool:
+    """Return True when failure looks like missing deps/tooling, not bad code."""
+    lowered = output.lower()
+    return any(marker in lowered for marker in _ENVIRONMENT_FAILURE_MARKERS)

@@ -89,6 +89,13 @@ def call_claude(
                 return response
             except Exception as exc:
                 last_error = exc
+                if _is_billing_failure(exc):
+                    log.error(
+                        "Anthropic billing/credit failure for agent=%s: %s",
+                        agent_name,
+                        exc,
+                    )
+                    break
                 if not _is_retryable(exc) or attempt >= _MAX_ATTEMPTS:
                     break
                 delay = _BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
@@ -117,6 +124,8 @@ def call_claude(
 
 def _is_retryable(exc: Exception) -> bool:
     """Return True for rate limits and transient server errors."""
+    if _is_billing_failure(exc):
+        return False
     if isinstance(exc, RateLimitError):
         return True
     if isinstance(exc, APIStatusError):
@@ -125,6 +134,24 @@ def _is_retryable(exc: Exception) -> bool:
         status_code = getattr(exc, "status_code", None)
         if isinstance(status_code, int) and status_code in _RETRYABLE_STATUS_CODES:
             return True
+    return False
+
+
+def _is_billing_failure(exc: Exception) -> bool:
+    """Return True when Anthropic rejects calls due to billing/credits."""
+    message = str(exc).lower()
+    billing_markers = (
+        "credit balance",
+        "insufficient credit",
+        "insufficient quota",
+        "billing",
+        "purchase credits",
+        "exceeded your current quota",
+    )
+    if any(marker in message for marker in billing_markers):
+        return True
+    if isinstance(exc, APIStatusError) and exc.status_code == 400:
+        return any(marker in message for marker in billing_markers)
     return False
 
 
