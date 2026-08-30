@@ -91,6 +91,7 @@ class ImplementationOrchestrator:
         """Decompose, implement each subtask, review, and open a PR when complete."""
         history: list[dict[str, Any]] = []
         branch_name = existing_branch or f"agent/fix-issue-{issue_number}"
+        self._ensure_fix_branch(branch_name)
 
         decompose_ctx = (
             reporter.stage("PLANNING", 50) if reporter is not None else nullcontext()
@@ -434,6 +435,25 @@ class ImplementationOrchestrator:
                 f"pass review after {self._max_rounds_per_subtask} round(s)."
             ),
         )
+
+    def _ensure_fix_branch(self, branch_name: str) -> None:
+        """Create the fix branch on GitHub when missing (idempotent)."""
+        try:
+            default_branch = self._adapter.get_default_branch()
+            self._adapter.create_branch(branch_name, from_ref=default_branch)
+            self._logger.info(
+                "Created fix branch %r from %r",
+                branch_name,
+                default_branch,
+            )
+        except AdapterError as exc:
+            message = str(exc).lower()
+            if "already exists" in message or "reference already exists" in message:
+                self._logger.info("Fix branch %r already exists", branch_name)
+                return
+            raise AgentError(
+                f"Could not create fix branch {branch_name!r}: {exc}"
+            ) from exc
 
     def _persist_state(
         self,

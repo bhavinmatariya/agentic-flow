@@ -235,15 +235,21 @@ class ImplementerAgent(BaseAgent):
             AgentError: If branch setup, cloning, Claude, or validation fails.
         """
         issue_number = int(issue["number"])
+        branch_name = self._code_edit.start_branch(primary_repo, issue_number)
         if existing_branch and existing_branch.strip():
-            branch_name = existing_branch.strip()
-            self._logger.info(
-                "Resuming implementation on existing branch %r for issue #%s",
-                branch_name,
-                issue_number,
-            )
-        else:
-            branch_name = self._code_edit.start_branch(primary_repo, issue_number)
+            requested = existing_branch.strip()
+            if requested != branch_name:
+                self._logger.warning(
+                    "Ignoring existing_branch %r; using %r",
+                    requested,
+                    branch_name,
+                )
+            else:
+                self._logger.info(
+                    "Continuing implementation on branch %r for issue #%s",
+                    branch_name,
+                    issue_number,
+                )
         local_repo_path = self._code_search.clone_repo(
             primary_repo,
             self._github_token,
