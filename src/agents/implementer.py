@@ -250,33 +250,40 @@ class ImplementerAgent(BaseAgent):
                     branch_name,
                     issue_number,
                 )
-        local_repo_path = self._code_search.clone_repo(
-            primary_repo,
-            self._github_token,
-        )
-        user_message = self._build_user_message(
-            issue=issue,
-            investigation=investigation,
-            approach=approach,
-            primary_repo=primary_repo,
-            branch_name=branch_name,
-            local_repo_path=local_repo_path,
-            human_approval_text=human_approval_text,
-            review_findings=review_findings,
-            attempt_failure_note=attempt_failure_note,
-            subtask=subtask,
-            subtask_index=subtask_index,
-            subtask_total=subtask_total,
-        )
-        result = self.run(user_message, ImplementationResult)
-        if result.branch_name != branch_name:
-            self._logger.warning(
-                "Model returned branch_name=%r; using %r",
-                result.branch_name,
-                branch_name,
+        session_parts = [f"issue #{issue_number}"]
+        if subtask_index is not None and subtask_total is not None:
+            session_parts.append(f"subtask {subtask_index}/{subtask_total}")
+        self._run_session_label = " · ".join(session_parts)
+        try:
+            local_repo_path = self._code_search.clone_repo(
+                primary_repo,
+                self._github_token,
             )
-            result = result.model_copy(update={"branch_name": branch_name})
-        return result
+            user_message = self._build_user_message(
+                issue=issue,
+                investigation=investigation,
+                approach=approach,
+                primary_repo=primary_repo,
+                branch_name=branch_name,
+                local_repo_path=local_repo_path,
+                human_approval_text=human_approval_text,
+                review_findings=review_findings,
+                attempt_failure_note=attempt_failure_note,
+                subtask=subtask,
+                subtask_index=subtask_index,
+                subtask_total=subtask_total,
+            )
+            result = self.run(user_message, ImplementationResult)
+            if result.branch_name != branch_name:
+                self._logger.warning(
+                    "Model returned branch_name=%r; using %r",
+                    result.branch_name,
+                    branch_name,
+                )
+                result = result.model_copy(update={"branch_name": branch_name})
+            return result
+        finally:
+            self._run_session_label = None
 
     def _build_user_message(
         self,

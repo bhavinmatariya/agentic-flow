@@ -86,6 +86,7 @@ class StageRecord:
     name: str
     ok: bool
     note: str = ""
+    checkpoint: str = ""
 
 
 @dataclass
@@ -102,6 +103,22 @@ class RunReporter:
     outcome: str = "running"
     outcome_detail: str = ""
     _startup_printed: bool = field(default=False, repr=False)
+    _checkpoint_index: int = field(default=0, repr=False)
+    _checkpoint_total: int = field(default=0, repr=False)
+
+    def plan_checkpoints(self, total: int) -> None:
+        """Reserve a fixed checkpoint budget for orchestrator implement/review work."""
+        self._checkpoint_total = max(1, int(total))
+        self._checkpoint_index = 0
+
+    def _next_checkpoint(self, detail: str) -> tuple[str, int]:
+        """Advance the checkpoint counter and return label + progress percent."""
+        if self._checkpoint_total <= 0:
+            return detail, 50
+        self._checkpoint_index += 1
+        label = f"Checkpoint {self._checkpoint_index}/{self._checkpoint_total} · {detail}"
+        percent = int(round(self._checkpoint_index / self._checkpoint_total * 95))
+        return label, max(1, min(95, percent))
 
     def print_startup_banner(self) -> None:
         """Print the main AGENTIC FLOW banner once per run."""
@@ -115,10 +132,15 @@ class RunReporter:
         self._startup_printed = True
 
     @contextmanager
-    def stage(self, name: str, percent: int) -> Iterator[None]:
+    def stage(self, name: str, percent: int, *, detail: str = "") -> Iterator[None]:
         """Print a stage banner, progress bar, and collapse detailed logs."""
         self.print_startup_banner()
+        checkpoint = ""
+        if detail:
+            checkpoint, percent = self._next_checkpoint(detail)
         print(ascii_banner(name, compact=True), flush=True)
+        if checkpoint:
+            print(f"{ANSI_GREEN}{checkpoint}{ANSI_RESET}", flush=True)
         print(f"{ANSI_GREEN}{progress_bar(percent)}{ANSI_RESET}", flush=True)
         print("::group::Details", flush=True)
         stage_ok = True
@@ -131,7 +153,14 @@ class RunReporter:
             raise
         finally:
             print("::endgroup::", flush=True)
-            self.stages.append(StageRecord(name=name, ok=stage_ok, note=stage_note))
+            self.stages.append(
+                StageRecord(
+                    name=name,
+                    ok=stage_ok,
+                    note=stage_note,
+                    checkpoint=checkpoint,
+                )
+            )
 
     def record_outcome_proposal_posted(self, *, approaches: int) -> None:
         """Record a successful issue_opened proposal run."""
@@ -228,7 +257,8 @@ class RunReporter:
             for stage in self.stages:
                 icon = ":white_check_mark:" if stage.ok else ":x:"
                 note = f" — {stage.note}" if stage.note else ""
-                lines.append(f"- {icon} **{stage.name}**{note}")
+                checkpoint = f"{stage.checkpoint} · " if stage.checkpoint else ""
+                lines.append(f"- {icon} {checkpoint}**{stage.name}**{note}")
         else:
             lines.append("- _No staged work recorded_")
 

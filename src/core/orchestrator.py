@@ -94,7 +94,7 @@ class ImplementationOrchestrator:
         self._ensure_fix_branch(branch_name)
 
         decompose_ctx = (
-            reporter.stage("PLANNING", 50) if reporter is not None else nullcontext()
+            reporter.stage("PLANNING", 10) if reporter is not None else nullcontext()
         )
         with decompose_ctx:
             if subtask_plan is None:
@@ -124,6 +124,10 @@ class ImplementationOrchestrator:
                 )
 
         total_subtasks = len(subtask_plan.subtasks)
+        if reporter is not None:
+            reporter.plan_checkpoints(
+                total_subtasks * self._max_rounds_per_subtask * 2
+            )
         combined_files: list[str] = []
         combined_summaries: list[str] = []
         last_review: ReviewResult | None = None
@@ -139,29 +143,22 @@ class ImplementationOrchestrator:
                 issue_number,
                 subtask.name,
             )
-            subtask_pct = 55 + int((subtask_index / max(total_subtasks, 1)) * 35)
-            subtask_ctx = (
-                reporter.stage("SUBTASK", subtask_pct)
-                if reporter is not None
-                else nullcontext()
-            )
 
-            with subtask_ctx:
-                outcome = self._run_subtask(
-                    issue=issue,
-                    investigation=investigation,
-                    approach=approach,
-                    primary_repo=primary_repo,
-                    issue_number=issue_number,
-                    subtask=subtask,
-                    subtask_index=subtask_index + 1,
-                    subtask_total=total_subtasks,
-                    is_final_subtask=is_final,
-                    human_approval_text=human_approval_text,
-                    existing_branch=branch_name,
-                    history=history,
-                    reporter=reporter,
-                )
+            outcome = self._run_subtask(
+                issue=issue,
+                investigation=investigation,
+                approach=approach,
+                primary_repo=primary_repo,
+                issue_number=issue_number,
+                subtask=subtask,
+                subtask_index=subtask_index + 1,
+                subtask_total=total_subtasks,
+                is_final_subtask=is_final,
+                human_approval_text=human_approval_text,
+                existing_branch=branch_name,
+                history=history,
+                reporter=reporter,
+            )
 
             last_review = outcome.review_result
             last_implementation = outcome.implementation_result
@@ -298,23 +295,31 @@ class ImplementationOrchestrator:
                 self._max_rounds_per_subtask,
                 issue_number,
             )
-            implement_ctx = (
-                reporter.stage("IMPLEMENTING", 60 + round_index * 3)
-                if reporter is not None
-                else nullcontext()
-            )
-            review_ctx = (
-                reporter.stage("REVIEWING", 72 + round_index * 3)
-                if reporter is not None
-                else nullcontext()
-            )
-
             review_findings: list[str] | None = None
             if last_review is not None and last_review.findings:
                 review_findings = list(last_review.findings)
 
             round_failure_note = last_round_failure_note
             last_round_failure_note = None
+
+            implement_detail = (
+                f"subtask {subtask_index}/{subtask_total} · "
+                f"implement round {round_index}/{self._max_rounds_per_subtask}"
+            )
+            review_detail = (
+                f"subtask {subtask_index}/{subtask_total} · "
+                f"review round {round_index}/{self._max_rounds_per_subtask}"
+            )
+            implement_ctx = (
+                reporter.stage("IMPLEMENTING", 0, detail=implement_detail)
+                if reporter is not None
+                else nullcontext()
+            )
+            review_ctx = (
+                reporter.stage("REVIEWING", 0, detail=review_detail)
+                if reporter is not None
+                else nullcontext()
+            )
 
             try:
                 with implement_ctx:

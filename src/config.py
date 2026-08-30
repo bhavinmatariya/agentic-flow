@@ -26,7 +26,7 @@ _AGENT_DEFAULTS: dict[str, AgentClaudeConfig] = {
     "proposer": AgentClaudeConfig(effort="high", temperature=0.0, max_tokens=8000),
     "response_parser": AgentClaudeConfig(effort="low", temperature=0.0, max_tokens=2000),
     "implementer": AgentClaudeConfig(effort="xhigh", temperature=0.0, max_tokens=16000),
-    "reviewer": AgentClaudeConfig(effort="high", temperature=0.0, max_tokens=16000),
+    "reviewer": AgentClaudeConfig(effort="medium", temperature=0.0, max_tokens=8000),
     "task_decomposer": AgentClaudeConfig(effort="high", temperature=0.0, max_tokens=8000),
 }
 
@@ -51,6 +51,8 @@ class Settings:
     reviewer: AgentClaudeConfig
     task_decomposer: AgentClaudeConfig
     reviewer_live_effort: str
+    anthropic_fallback_model: str | None
+    live_verification_enabled: bool
 
     @classmethod
     def from_env(cls, *, env_file: str | None = ".env") -> Settings:
@@ -89,7 +91,12 @@ class Settings:
             implementer=_load_agent_config("implementer"),
             reviewer=_load_agent_config("reviewer"),
             task_decomposer=_load_agent_config("task_decomposer"),
-            reviewer_live_effort=_env_str("REVIEWER_LIVE_EFFORT", "xhigh"),
+            reviewer_live_effort=_env_str("REVIEWER_LIVE_EFFORT", "high"),
+            anthropic_fallback_model=_optional_env_str(
+                "ANTHROPIC_FALLBACK_MODEL",
+                "claude-sonnet-4-20250514",
+            ),
+            live_verification_enabled=_env_bool("LIVE_VERIFICATION_ENABLED", False),
         )
 
     def agent_config(self, agent_type: str) -> AgentClaudeConfig:
@@ -155,3 +162,24 @@ def _env_int(key: str, default: int) -> int:
     if parsed < 1:
         raise ConfigurationError(f"{key} must be >= 1, got: {parsed}")
     return parsed
+
+
+def _optional_env_str(key: str, default: str | None) -> str | None:
+    """Return env value when set; otherwise ``default`` (may be None)."""
+    value = os.getenv(key, "").strip()
+    if not value:
+        return default
+    return value
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    raw = os.getenv(key, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(
+        f"{key} must be a boolean (true/false, 1/0, yes/no), got: {raw!r}"
+    )

@@ -35,83 +35,83 @@ def call_claude(
     *,
     agent_name: str,
     logger: logging.Logger | None = None,
+    fallback_model: str | None = None,
 ) -> Any:
-    """Invoke Claude Messages API with retries, effort config, and structured logging.
+    """Invoke Claude Messages API with retries, optional fallback model, and logging.
 
     This is the only function in agentic-flow that calls ``client.messages.create``.
 
-    Args:
-        client: Authenticated Anthropic SDK client.
-        model: Model identifier.
-        system_prompt: System prompt for the call.
-        messages: Conversation messages for the API.
-        tools: Tool definitions; may be empty.
-        effort: Effort level passed via ``output_config``.
-        temperature: Configured sampling temperature (logged only; omitted from
-            the API request because effort-based Claude models reject it).
-        max_tokens: Maximum output tokens.
-        agent_name: Logical agent name used in logs (for example ``investigator``).
-        logger: Optional logger; defaults to the shared module logger.
-
-    Returns:
-        Raw Anthropic message response object.
-
-    Raises:
-        AgentError: When the API fails after retries or a non-retryable error occurs.
+    When the primary ``model`` fails after retries, a distinct ``fallback_model``
+    (for example from ``ANTHROPIC_FALLBACK_MODEL``) is tried once with the same
+    retry policy.
     """
     log = logger or get_logger(__name__)
+    models_to_try = [model.strip()]
+    if fallback_model and fallback_model.strip() and fallback_model.strip() != model.strip():
+        models_to_try.append(fallback_model.strip())
+
     last_error: Exception | None = None
-
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
-        try:
-            request_kwargs: dict[str, Any] = {
-                "model": model,
-                "max_tokens": max_tokens,
-                "system": system_prompt,
-                "messages": messages,
-                "output_config": {"effort": effort},
-            }
-            if tools:
-                request_kwargs["tools"] = tools
-            # Claude 4.6+ / Sonnet 5 / Opus 5 reject temperature, top_p, and top_k
-            # when using output_config.effort. Keep temperature in logs/config only.
-
-            response = client.messages.create(**request_kwargs)
-            _log_claude_call(
-                log,
-                agent_name=agent_name,
-                model=model,
-                effort=effort,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                response=response,
-                attempt=attempt,
-            )
-            return response
-        except Exception as exc:
-            last_error = exc
-            if not _is_retryable(exc) or attempt >= _MAX_ATTEMPTS:
-                break
-            delay = _BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+    for model_index, active_model in enumerate(models_to_try):
+        if model_index > 0:
             log.warning(
-                "Claude call retry for agent=%s model=%s effort=%s "
-                "(attempt %d/%d, sleeping %.1fs): %s",
-                agent_name,
+                "Primary model %r failed for agent=%s; trying fallback model %r",
                 model,
-                effort,
-                attempt,
-                _MAX_ATTEMPTS,
-                delay,
-                exc,
+                agent_name,
+                active_model,
             )
-            time.sleep(delay)
+
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                request_kwargs: dict[str, Any] = {
+                    "model": active_model,
+                    "max_tokens": max_tokens,
+                    "system": system_prompt,
+                    "messages": messages,
+                    "output_config": {"effort": effort},
+                }
+                if tools:
+                    request_kwargs["tools"] = tools
+                # Claude 4.6+ / Sonnet 5 / Opus 5 reject temperature, top_p, and top_k
+                # when using output_config.effort. Keep temperature in logs/config only.
+
+                response = client.messages.create(**request_kwargs)
+                _log_claude_call(
+                    log,
+                    agent_name=agent_name,
+                    model=active_model,
+                    effort=effort,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response=response,
+                    attempt=attempt,
+                    used_fallback=model_index > 0,
+                )
+                return response
+            except Exception as exc:
+                last_error = exc
+                if not _is_retryable(exc) or attempt >= _MAX_ATTEMPTS:
+                    break
+                delay = _BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+                log.warning(
+                    "Claude call retry for agent=%s model=%s effort=%s "
+                    "(attempt %d/%d, sleeping %.1fs): %s",
+                    agent_name,
+                    active_model,
+                    effort,
+                    attempt,
+                    _MAX_ATTEMPTS,
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
 
     assert last_error is not None
+    tried = ", ".join(repr(item) for item in models_to_try)
     raise AgentError(
         "Claude API call failed for "
-        f"agent={agent_name!r}, model={model!r}, effort={effort!r}, "
+        f"agent={agent_name!r}, model(s) tried=[{tried}], effort={effort!r}, "
         f"temperature={temperature}, max_tokens={max_tokens} "
-        f"after {_MAX_ATTEMPTS} attempt(s): {last_error}"
+        f"after {_MAX_ATTEMPTS} attempt(s) per model: {last_error}"
     ) from last_error
 
 
@@ -138,6 +138,7 @@ def _log_claude_call(
     max_tokens: int,
     response: Any,
     attempt: int,
+    used_fallback: bool = False,
 ) -> None:
     """Log token usage and estimated cost for a successful Claude call."""
     usage = getattr(response, "usage", None)
@@ -145,11 +146,12 @@ def _log_claude_call(
     output_tokens = getattr(usage, "output_tokens", None)
     cost_usd = _estimate_cost_usd(model, input_tokens, output_tokens)
     cost_text = f"${cost_usd:.6f}" if cost_usd is not None else "n/a"
+    fallback_note = " fallback=true" if used_fallback else ""
 
     logger.info(
         "Claude call agent=%s model=%s effort=%s configured_temperature=%s "
         "(omitted from API) max_tokens=%d attempt=%d input_tokens=%s "
-        "output_tokens=%s estimated_cost=%s",
+        "output_tokens=%s estimated_cost=%s%s",
         agent_name,
         model,
         effort,
@@ -159,6 +161,7 @@ def _log_claude_call(
         input_tokens,
         output_tokens,
         cost_text,
+        fallback_note,
     )
 
 

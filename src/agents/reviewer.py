@@ -47,6 +47,41 @@ _LIVE_VERIFICATION_TOOLS: Final[frozenset[str]] = frozenset(
 )
 _LIVE_VERIFICATION_BUDGET_SECONDS: Final[int] = 20 * 60
 
+REVIEWER_CODE_ONLY_SYSTEM_PROMPT: Final[str] = (
+    "You are reviewing an implemented fix before it becomes a pull request. "
+    "Compare the change against the original issue, investigation, and "
+    "approved approach. Use read_file and search_code to inspect the branch "
+    "checkout. Use run_command only for lightweight project checks such as "
+    "tests or linters when those commands exist.\n\n"
+    "First call detect_change_layers with the provided files_changed list. "
+    "Rely on the precomputed automated_checks block in your instructions — "
+    "do NOT start servers, browsers, Playwright, or disposable databases. "
+    "Set ui_verification and db_verification to null.\n\n"
+    "When reviewing a single subtask (not the final one), approve if THAT "
+    "subtask's scope is correctly implemented; do not reject because later "
+    "subtasks are not done yet.\n\n"
+    "Extract every concrete literal detail mentioned in the human's request or "
+    "approved approach (exact colors, copy/text, specific values, named "
+    "behaviors). Check the actual diff against each one individually. If any "
+    "literal detail was not applied, set approved=false and name the missing "
+    "detail explicitly in findings — do not approve just because the code runs "
+    "or looks reasonable.\n\n"
+    "If a competing-implementation conflict is found (duplicate CSS rules, "
+    "overlapping state, two code paths for the same behavior), require the "
+    "next round's fix to remove the conflict, not add a third implementation "
+    "on top. Report this clearly in findings.\n\n"
+    "Set making_progress=false only when you believe another implement/review "
+    "round cannot help (blocked requirement, fundamental mismatch, or the "
+    "same failure would repeat with no new lever). Otherwise keep "
+    "making_progress=true so the agent can self-heal.\n\n"
+    "Respond with ONLY JSON: {\"approved\": bool, \"summary\": str, "
+    "\"findings\": [str], \"making_progress\": bool, \"layers_detected\": "
+    "{\"frontend\": bool, "
+    "\"database\": bool, \"backend\": bool}, \"ui_verification\": null, "
+    "\"db_verification\": null}."
+)
+
+
 REVIEWER_SYSTEM_PROMPT: Final[str] = (
     "You are reviewing an implemented fix before it becomes a pull request. "
     "Compare the change against the original issue, investigation, and "
@@ -157,8 +192,11 @@ class ReviewerAgent(BaseAgent):
         self._active_connection_string: str | None = None
         self._live_state: _LiveVerificationState | None = None
         self._review_context: dict[str, Any] | None = None
-        self.system_prompt = REVIEWER_SYSTEM_PROMPT
-        self.tool_definitions = _build_tool_definitions(include_live=True)
+        include_live = settings.live_verification_enabled
+        self.system_prompt = (
+            REVIEWER_SYSTEM_PROMPT if include_live else REVIEWER_CODE_ONLY_SYSTEM_PROMPT
+        )
+        self.tool_definitions = _build_tool_definitions(include_live=include_live)
 
     def review(
         self,
@@ -188,6 +226,11 @@ class ReviewerAgent(BaseAgent):
             implementation.files_changed,
         )
         default_effort = self._settings.agent_config("reviewer").effort
+        self._effort = default_effort
+        session_parts: list[str] = ["review"]
+        if subtask_index is not None and subtask_total is not None:
+            session_parts.append(f"subtask {subtask_index}/{subtask_total}")
+        self._run_session_label = " · ".join(session_parts)
         self._review_context = {
             "issue": issue,
             "investigation": investigation,
@@ -203,7 +246,12 @@ class ReviewerAgent(BaseAgent):
             "is_final_subtask": is_final_subtask,
         }
 
-        if layers.get("frontend") and layers.get("database") and is_final_subtask:
+        if (
+            self._settings.live_verification_enabled
+            and layers.get("frontend")
+            and layers.get("database")
+            and is_final_subtask
+        ):
             self._effort = self._settings.reviewer_live_effort
             self._live_state = _LiveVerificationState(
                 deadline=time.monotonic() + _LIVE_VERIFICATION_BUDGET_SECONDS,
@@ -244,7 +292,9 @@ class ReviewerAgent(BaseAgent):
             self._safe_cleanup_live_verification()
             self._live_state = None
             self._review_context = None
-            self.tool_definitions = _build_tool_definitions(include_live=True)
+            self._run_session_label = None
+            include_live = self._settings.live_verification_enabled
+            self.tool_definitions = _build_tool_definitions(include_live=include_live)
 
     def _run_tool_calls(self, response: Any) -> list[dict[str, Any]]:
         """Execute tools, propagating environment aborts to the review fallback."""
@@ -317,10 +367,20 @@ class ReviewerAgent(BaseAgent):
             f"Implementation summary:\n{implementation.summary}\n\n"
             f"Files changed:\n{files_block}\n\n"
             f"Precomputed layers_detected: {json.dumps(layers)}\n\n"
-            "Start by calling detect_change_layers with files_changed. "
-            "Run live verification only when both frontend and database are true "
-            "and this is the final subtask."
         )
+        if self._settings.live_verification_enabled:
+            message += (
+                "Start by calling detect_change_layers with files_changed. "
+                "Run live verification only when both frontend and database are true "
+                "and this is the final subtask."
+            )
+        else:
+            message += (
+                "Start by calling detect_change_layers with files_changed. "
+                "Code review only — rely on read_file, search_code, run_command, and "
+                "the precomputed automated_checks block. Do NOT start servers, "
+                "Playwright, or disposable databases."
+            )
         if subtask is not None:
             index_text = (
                 f"{subtask_index}/{subtask_total}"

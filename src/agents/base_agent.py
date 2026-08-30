@@ -67,6 +67,7 @@ class BaseAgent(ABC):
         self._logger = get_logger(__name__)
         self.system_prompt = ""
         self.tool_definitions = []
+        self._run_session_label: str | None = None
 
     @abstractmethod
     def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
@@ -87,9 +88,11 @@ class BaseAgent(ABC):
             stop_reason = response.stop_reason
 
             if stop_reason == "tool_use":
+                session = self._run_session_label or self._agent_type
                 self._logger.info(
-                    "Agent %s starting tool-use turn %d/%d",
+                    "Agent %s [%s] tool step %d/%d (resets each implement/review call)",
                     self._agent_type,
+                    session,
                     turn,
                     _MAX_TURNS,
                 )
@@ -161,6 +164,7 @@ class BaseAgent(ABC):
             self._max_tokens,
             agent_name=self._agent_type,
             logger=self._logger,
+            fallback_model=self._settings.anthropic_fallback_model,
         )
 
     def _apply_token_budget(self, messages: list[dict[str, Any]]) -> None:
