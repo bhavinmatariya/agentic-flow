@@ -314,6 +314,7 @@ class ImplementationOrchestrator:
                 issue_number,
             )
             review_findings: list[str] | None = None
+            phantom_findings = False
             if (
                 last_review is not None
                 and not last_review.approved
@@ -321,18 +322,30 @@ class ImplementationOrchestrator:
                 and not last_review_failed
             ):
                 review_findings = list(last_review.findings)
+                phantom_findings = _findings_indicate_phantom_implement(review_findings)
 
             round_failure_note = last_round_failure_note
             prior_review_failed = last_review_failed
             last_round_failure_note = None
             last_review_failed = False
 
+            baseline_verified = (
+                baseline_implementation is not None
+                and bool(baseline_implementation.files_changed)
+                and self._implementer.files_exist_on_branch(
+                    primary_repo,
+                    existing_branch,
+                    list(baseline_implementation.files_changed),
+                )
+            )
+
             if (
                 round_index > 1
-                and baseline_implementation is not None
+                and baseline_verified
                 and last_review is not None
                 and not last_review.approved
                 and not prior_review_failed
+                and not phantom_findings
             ):
                 verify_detail = (
                     f"subtask {subtask_index}/{subtask_total} · "
@@ -447,6 +460,10 @@ class ImplementationOrchestrator:
                         subtask_total=subtask_total,
                         repo_session=repo_session,
                         baseline_implementation=baseline_implementation,
+                        require_fresh_commits=(
+                            round_index == 1 and not baseline_verified
+                        )
+                        or phantom_findings,
                     )
             except Exception as exc:
                 short_error = _short_error(exc)
@@ -459,7 +476,8 @@ class ImplementationOrchestrator:
                 )
                 if (
                     _is_no_edit_file_error(exc)
-                    and baseline_implementation is not None
+                    and baseline_verified
+                    and not phantom_findings
                 ):
                     merged_for_review = _merge_implementation_results(
                         baseline_implementation,
@@ -538,10 +556,21 @@ class ImplementationOrchestrator:
                 )
                 continue
 
-            baseline_implementation = _merge_implementation_results(
-                baseline_implementation,
-                implementation,
-            )
+            if (
+                self._implementer.last_committed_paths
+                or (
+                    implementation.files_changed
+                    and self._implementer.files_exist_on_branch(
+                        primary_repo,
+                        existing_branch,
+                        list(implementation.files_changed),
+                    )
+                )
+            ):
+                baseline_implementation = _merge_implementation_results(
+                    baseline_implementation,
+                    implementation,
+                )
 
             try:
                 with review_ctx:
@@ -606,6 +635,21 @@ class ImplementationOrchestrator:
                     implementation_result=implementation,
                     review_result=review,
                 )
+
+            if not review.making_progress and _findings_indicate_phantom_implement(
+                review.findings
+            ):
+                if round_index < self._max_rounds_per_subtask:
+                    last_round_failure_note = _format_force_edit_note(
+                        list(review.findings)
+                    )
+                    self._logger.warning(
+                        "Reviewer set making_progress=false for phantom implement on "
+                        "subtask %d round %d; forcing another implement round",
+                        subtask_index,
+                        round_index,
+                    )
+                    continue
 
             if not review.making_progress and round_index >= self._max_rounds_per_subtask:
                 return _SubtaskOutcome(
@@ -868,7 +912,32 @@ def _is_no_edit_file_error(exc: BaseException) -> bool:
     return (
         "no successful edit_file" in message
         or "no edit_file commit" in message
+        or "empty files_changed" in message
+        or "requires at least one successful edit_file" in message
     )
+
+
+def _findings_indicate_phantom_implement(findings: list[str] | None) -> bool:
+    """Return True when reviewer reported claimed files/commits are missing."""
+    if not findings:
+        return False
+    text = " ".join(findings).lower()
+    markers = (
+        "does not exist",
+        "file not found",
+        "not present",
+        "not exist in",
+        "hallucin",
+        "not contain",
+        "was not committed",
+        "never committed",
+        "not actually",
+        "does not contain",
+        "falsely",
+        "incorrect/hallucinated",
+        "not implemented at all",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _format_force_edit_note(findings: list[str]) -> str:

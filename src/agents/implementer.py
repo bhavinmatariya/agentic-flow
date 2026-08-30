@@ -56,8 +56,9 @@ IMPLEMENTER_SYSTEM_PROMPT: Final[str] = (
     "10. Every path in files_changed MUST be committed on GitHub via a "
     "successful edit_file call in this session before you return final JSON. "
     "Never claim a file was added or changed without a successful edit_file "
-    "response {\"status\": \"committed\"}. If edit_file returns an error, fix "
-    "and retry — do not return success JSON anyway.\n"
+    "response {\"status\": \"committed\"}. Never describe work in summary that "
+    "is not reflected in files_changed AND on the branch via edit_file. If "
+    "edit_file returns an error, fix and retry — do not return success JSON anyway.\n"
     "11. read_file returns LIVE content from the working branch on GitHub — "
     "use that exact text as old_string for edit_file. If edit_file says "
     "old_string was not found, call read_file again on that path before retrying.\n\n"
@@ -217,6 +218,7 @@ class ImplementerAgent(BaseAgent):
         self.system_prompt = IMPLEMENTER_SYSTEM_PROMPT
         self.tool_definitions = list(IMPLEMENTER_TOOL_DEFINITIONS)
         self._committed_paths: set[str] = set()
+        self._last_committed_paths: frozenset[str] = frozenset()
         self._working_repo: str = ""
         self._working_branch: str = ""
         self._local_repo_path: str = ""
@@ -237,6 +239,24 @@ class ImplementerAgent(BaseAgent):
             logger=self._logger,
         )
 
+    def files_exist_on_branch(
+        self,
+        repo: str,
+        branch: str,
+        paths: list[str],
+    ) -> bool:
+        """Return True when every path exists on the GitHub branch."""
+        if not paths:
+            return False
+        return all(
+            self._code_edit.file_exists_on_branch(
+                repo,
+                branch,
+                _normalize_repo_path(path),
+            )
+            for path in paths
+        )
+
     def implement(
         self,
         issue: dict[str, Any],
@@ -253,6 +273,7 @@ class ImplementerAgent(BaseAgent):
         subtask_total: int | None = None,
         repo_session: RepositorySession | None = None,
         baseline_implementation: ImplementationResult | None = None,
+        require_fresh_commits: bool = False,
     ) -> ImplementationResult:
         """Apply ``approach`` on a dedicated branch and return the outcome.
 
@@ -348,6 +369,7 @@ class ImplementerAgent(BaseAgent):
                     subtask=subtask,
                     attempt_failure_note=attempt_failure_note,
                     baseline_implementation=baseline_implementation,
+                    require_fresh_commits=require_fresh_commits,
                 )
             except AgentError as exc:
                 if not (
@@ -384,8 +406,10 @@ class ImplementerAgent(BaseAgent):
                     attempt_failure_note=attempt_failure_note,
                     baseline_implementation=baseline_implementation,
                     strict_commits=True,
+                    require_fresh_commits=require_fresh_commits,
                 )
         finally:
+            self._last_committed_paths = frozenset(self._committed_paths)
             self._run_session_label = None
             self._committed_paths = set()
             self._edit_failures = {}
@@ -620,6 +644,7 @@ class ImplementerAgent(BaseAgent):
         attempt_failure_note: str | None = None,
         baseline_implementation: ImplementationResult | None = None,
         strict_commits: bool = False,
+        require_fresh_commits: bool = False,
     ) -> ImplementationResult:
         """Ensure claimed files exist on GitHub and commits match reality."""
         repo = self._working_repo
@@ -640,9 +665,40 @@ class ImplementerAgent(BaseAgent):
                 '{"status": "committed"} before returning final JSON.'
             )
 
+        if (
+            subtask is not None
+            and not self._committed_paths
+            and not claimed
+            and (require_fresh_commits or strict_commits or bool(review_findings))
+        ):
+            raise AgentError(
+                f"Subtask {subtask.name!r} returned empty files_changed with no "
+                "successful edit_file commits. Call edit_file for each required "
+                "file before returning final JSON."
+            )
+
+        if claimed and not self._committed_paths:
+            uncommitted = [
+                path
+                for path in claimed
+                if not self._code_edit.file_exists_on_branch(repo, branch, path)
+            ]
+            if uncommitted:
+                raise AgentError(
+                    "files_changed lists paths that are not on GitHub and were not "
+                    f"committed this session: {uncommitted}. Call edit_file for each."
+                )
+
+        if require_fresh_commits and not self._committed_paths and not strict_commits:
+            if not claimed or not self.files_exist_on_branch(repo, branch, claimed):
+                raise AgentError(
+                    f"Subtask {subtask.name if subtask else 'work'} requires at least "
+                    "one successful edit_file commit this session."
+                )
+
         require_commit_for_findings = bool(review_findings) and not _is_reviewer_infra_retry(
             attempt_failure_note
-        )
+        ) and not _findings_indicate_phantom_implement(review_findings)
         if (
             require_commit_for_findings
             and not self._committed_paths
@@ -716,6 +772,28 @@ class ImplementerAgent(BaseAgent):
 def _normalize_repo_path(path: str) -> str:
     """Normalize a repository-relative path."""
     return path.replace("\\", "/").lstrip("/")
+
+
+def _findings_indicate_phantom_implement(findings: list[str] | None) -> bool:
+    """Return True when reviewer reported claimed files/commits are missing."""
+    if not findings:
+        return False
+    text = " ".join(findings).lower()
+    markers = (
+        "does not exist",
+        "file not found",
+        "not present",
+        "not exist in",
+        "hallucin",
+        "not contain",
+        "was not committed",
+        "never committed",
+        "not actually",
+        "does not contain",
+        "falsely",
+        "incorrect/hallucinated",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _is_reviewer_infra_retry(note: str | None) -> bool:
