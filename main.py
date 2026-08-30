@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -31,12 +32,13 @@ from agents.response_parser import ResponseParserAgent
 from agents.reviewer import ReviewerAgent
 from config import ConfigurationError, Settings
 from core.exceptions import AgentError
-from core.models import ParsedIntent
+from core.models import Approach, Investigation, ParsedIntent
 from core.orchestrator import (
     DONE_LABEL,
     IN_PROGRESS_LABEL,
     NEEDS_HUMAN_LABEL,
     ImplementationOrchestrator,
+    OrchestratorResult,
     resolve_approach,
 )
 from tools.browser_test import BrowserTestTool
@@ -51,6 +53,90 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "claude-sonnet-5"
 AWAITING_APPROVAL_LABEL = "agent:awaiting-approval"
 PROPOSAL_COMMENT_HEADER = PROPOSAL_SECTION_HEADER
+STATE_MARKER = "agentic-flow:state"
+_STATE_COMMENT_PATTERN = re.compile(
+    r"<!--\s*agentic-flow:state\s*\n(.*?)\n-->",
+    re.DOTALL,
+)
+
+
+def _default_fix_branch(issue_number: int) -> str:
+    return f"agent/fix-issue-{issue_number}"
+
+
+def _format_state_comment(
+    investigation: Investigation,
+    approach: Approach,
+    branch: str,
+) -> str:
+    """Build a hidden state payload comment for resume after ``needs-human``."""
+    payload = {
+        "investigation": investigation.model_dump(),
+        "approach": approach.model_dump(),
+        "branch": branch,
+    }
+    return f"<!-- agentic-flow:state\n{json.dumps(payload, ensure_ascii=False)}\n-->"
+
+
+def _find_latest_state_comment(
+    comments: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the most recent comment containing an agentic-flow state marker."""
+    matches = [
+        comment
+        for comment in comments
+        if isinstance(comment.get("body"), str) and STATE_MARKER in comment["body"]
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda comment: str(comment.get("created_at", "")))
+
+
+def _parse_state_comment(body: str) -> tuple[Investigation, Approach, str]:
+    """Parse investigation, approach, and branch from a state comment body."""
+    match = _STATE_COMMENT_PATTERN.search(body)
+    if match is None:
+        raise AgentError(
+            f"State comment on issue is missing a valid {STATE_MARKER!r} payload."
+        )
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        raise AgentError(f"State comment JSON is invalid: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise AgentError("State comment payload must be a JSON object.")
+
+    branch = str(payload.get("branch") or "").strip()
+    if not branch:
+        raise AgentError("State comment payload is missing a non-empty branch name.")
+
+    try:
+        investigation = Investigation.model_validate(payload.get("investigation"))
+        approach = Approach.model_validate(payload.get("approach"))
+    except ValidationError as exc:
+        raise AgentError(f"State comment payload failed validation: {exc}") from exc
+
+    return investigation, approach, branch
+
+
+def _post_pipeline_state(
+    adapter: GitHubAdapter,
+    issue_number: int,
+    investigation: Investigation,
+    approach: Approach,
+) -> None:
+    """Post hidden investigation/approach/branch state for later resume."""
+    branch = _default_fix_branch(issue_number)
+    adapter.post_comment(
+        issue_number,
+        _format_state_comment(investigation, approach, branch),
+    )
+    logger.info(
+        "Posted pipeline state for issue #%s (branch=%r)",
+        issue_number,
+        branch,
+    )
 
 
 @dataclass
@@ -274,6 +360,17 @@ def _handle_issue_comment(
         reporter.record_outcome_noop("Ignoring bot's own comment")
         return 0
 
+    if adapter.has_label(issue_number, NEEDS_HUMAN_LABEL):
+        return _handle_resume(
+            adapter=adapter,
+            settings=settings,
+            issue_number=issue_number,
+            model=model,
+            comment_body=comment_body,
+            repos_json=repos_json,
+            reporter=reporter,
+        )
+
     if not adapter.has_label(issue_number, AWAITING_APPROVAL_LABEL):
         reason = (
             f"Issue #{issue_number} does not have label {AWAITING_APPROVAL_LABEL!r}; "
@@ -368,6 +465,115 @@ def _handle_issue_comment(
         )
 
 
+def _finish_orchestrator_run(
+    *,
+    adapter: GitHubAdapter,
+    issue_number: int,
+    result: OrchestratorResult,
+    reporter: RunReporter,
+) -> int:
+    """Apply labels/comments after orchestrator.run completes."""
+    if result.passed and result.pr_url:
+        if adapter.has_label(issue_number, IN_PROGRESS_LABEL):
+            adapter.remove_label(issue_number, IN_PROGRESS_LABEL)
+        adapter.add_label(issue_number, DONE_LABEL)
+        adapter.post_comment(
+            issue_number,
+            f"Pull request opened for the approved fix:\n\n{result.pr_url}",
+        )
+        files = (
+            list(result.implementation_result.files_changed)
+            if result.implementation_result
+            else []
+        )
+        reporter.record_outcome_pr_opened(
+            result.pr_url,
+            round_count=len(result.round_history),
+            files=files,
+        )
+        return 0
+
+    files = (
+        list(result.implementation_result.files_changed)
+        if result.implementation_result
+        else []
+    )
+    reporter.record_outcome_needs_human(
+        round_count=len(result.round_history),
+        files=files,
+    )
+    logger.warning(
+        "Pipeline stalled for issue #%s; diagnostic already posted by orchestrator",
+        issue_number,
+    )
+    return 1
+
+
+def _handle_resume(
+    *,
+    adapter: GitHubAdapter,
+    settings: Settings,
+    issue_number: int,
+    model: str,
+    comment_body: str,
+    repos_json: Path,
+    reporter: RunReporter,
+) -> int:
+    """Resume implement/review from saved state on an existing fix branch."""
+    issue = adapter.get_issue(issue_number)
+    comments = adapter.list_comments(issue_number)
+    state_comment = _find_latest_state_comment(comments)
+    if state_comment is None:
+        raise AgentError(
+            f"Issue #{issue_number} has {NEEDS_HUMAN_LABEL!r} but no "
+            f"{STATE_MARKER!r} state comment was found to resume from."
+        )
+
+    investigation, approach, branch = _parse_state_comment(str(state_comment["body"]))
+    logger.info(
+        "Resuming issue #%s from saved state on branch %r (approach=%r)",
+        issue_number,
+        branch,
+        approach.name,
+    )
+
+    adapter.remove_label(issue_number, NEEDS_HUMAN_LABEL)
+    adapter.add_label(issue_number, IN_PROGRESS_LABEL)
+    adapter.post_comment(
+        issue_number,
+        f":repeat: Resuming work on issue #{issue_number}, continuing from the "
+        f"existing branch `{branch}`.",
+    )
+
+    with tempfile.TemporaryDirectory(prefix="agentic-flow-resume-") as tmp:
+        agents = _build_pipeline_agents(
+            settings=settings,
+            adapter=adapter,
+            model=model,
+            tmp_dir=tmp,
+            repos_json=repos_json,
+        )
+        _post_pipeline_state(adapter, issue_number, investigation, approach)
+        with reporter.stage("RESUMING", 35):
+            result = agents.orchestrator.run(
+                issue,
+                investigation,
+                approach,
+                settings.github_repo,
+                issue_number,
+                human_approval_text=comment_body,
+                existing_branch=branch,
+                reporter=reporter,
+            )
+
+    return _finish_orchestrator_run(
+        adapter=adapter,
+        issue_number=issue_number,
+        result=result,
+        reporter=reporter,
+    )
+
+
 def _handle_approval(
     *,
     adapter: GitHubAdapter,
@@ -407,6 +613,8 @@ def _handle_approval(
             approach.name,
         )
 
+    _post_pipeline_state(adapter, issue_number, investigation, approach)
+
     result = agents.orchestrator.run(
         issue,
         investigation,
@@ -417,40 +625,12 @@ def _handle_approval(
         reporter=reporter,
     )
 
-    if result.passed and result.pr_url:
-        if adapter.has_label(issue_number, IN_PROGRESS_LABEL):
-            adapter.remove_label(issue_number, IN_PROGRESS_LABEL)
-        adapter.add_label(issue_number, DONE_LABEL)
-        adapter.post_comment(
-            issue_number,
-            f"Pull request opened for the approved fix:\n\n{result.pr_url}",
-        )
-        files = (
-            list(result.implementation_result.files_changed)
-            if result.implementation_result
-            else []
-        )
-        reporter.record_outcome_pr_opened(
-            result.pr_url,
-            round_count=len(result.round_history),
-            files=files,
-        )
-        return 0
-
-    files = (
-        list(result.implementation_result.files_changed)
-        if result.implementation_result
-        else []
+    return _finish_orchestrator_run(
+        adapter=adapter,
+        issue_number=issue_number,
+        result=result,
+        reporter=reporter,
     )
-    reporter.record_outcome_needs_human(
-        round_count=len(result.round_history),
-        files=files,
-    )
-    logger.warning(
-        "Pipeline stalled for issue #%s; diagnostic already posted by orchestrator",
-        issue_number,
-    )
-    return 1
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

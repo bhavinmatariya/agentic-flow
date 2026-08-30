@@ -65,6 +65,7 @@ class ImplementationOrchestrator:
         issue_number: int,
         *,
         human_approval_text: str | None = None,
+        existing_branch: str | None = None,
         reporter: RunReporter | None = None,
     ) -> OrchestratorResult:
         """Implement, review, and open a PR when review approves the change."""
@@ -114,6 +115,7 @@ class ImplementationOrchestrator:
                         human_approval_text=human_approval_text,
                         review_findings=review_findings,
                         attempt_failure_note=round_failure_note,
+                        existing_branch=existing_branch,
                     )
             except Exception as exc:
                 short_error = _short_error(exc)

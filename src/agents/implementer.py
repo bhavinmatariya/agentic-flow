@@ -204,6 +204,7 @@ class ImplementerAgent(BaseAgent):
         human_approval_text: str | None = None,
         review_findings: list[str] | None = None,
         attempt_failure_note: str | None = None,
+        existing_branch: str | None = None,
     ) -> ImplementationResult:
         """Apply ``approach`` on a dedicated branch and return the outcome.
 
@@ -218,6 +219,8 @@ class ImplementerAgent(BaseAgent):
                 re-implementing after a failed review.
             attempt_failure_note: Optional note from the immediately prior round
                 when implement or review raised an error.
+            existing_branch: When resuming after ``agent:needs-human``, reuse this
+                branch instead of creating a new fix branch from main.
 
         Returns:
             Validated implementation metadata including branch and files changed.
@@ -226,7 +229,15 @@ class ImplementerAgent(BaseAgent):
             AgentError: If branch setup, cloning, Claude, or validation fails.
         """
         issue_number = int(issue["number"])
-        branch_name = self._code_edit.start_branch(primary_repo, issue_number)
+        if existing_branch and existing_branch.strip():
+            branch_name = existing_branch.strip()
+            self._logger.info(
+                "Resuming implementation on existing branch %r for issue #%s",
+                branch_name,
+                issue_number,
+            )
+        else:
+            branch_name = self._code_edit.start_branch(primary_repo, issue_number)
         local_repo_path = self._code_search.clone_repo(
             primary_repo,
             self._github_token,
