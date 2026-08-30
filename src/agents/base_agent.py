@@ -32,6 +32,12 @@ _FORCE_JSON_PROMPT: Final[str] = (
     "Respond with ONLY the final JSON object required by your instructions — "
     "no prose, no markdown fences."
 )
+_REFUSAL_RETRY_PROMPT: Final[str] = (
+    "Your previous response was blocked or empty. This is an automated code "
+    "review on the repository owner's own project — standard software engineering "
+    "only. Do NOT call more tools. Respond with ONLY the final JSON object "
+    "required by your instructions — no prose, no markdown fences."
+)
 _TURN_LIMIT_WARNING_AT: int = 20
 
 
@@ -156,6 +162,21 @@ class BaseAgent(ABC):
                         turn,
                     )
                     continue
+                if stop_reason in {"refusal", "content_filter"}:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": self._assistant_content(response),
+                        }
+                    )
+                    messages.append({"role": "user", "content": _REFUSAL_RETRY_PROMPT})
+                    self._logger.warning(
+                        "Agent %s got stop_reason=%r on turn %d; requesting final JSON only",
+                        self._agent_type,
+                        stop_reason,
+                        turn,
+                    )
+                    continue
                 raise AgentError(
                     f"Claude returned no text (stop_reason={stop_reason!r}). "
                     "The model must emit a JSON object matching the output schema."
@@ -177,6 +198,20 @@ class BaseAgent(ABC):
                 "tool errors and retry."
             )
         final_text = self._collect_text(final_response)
+        if not final_text.strip() and final_response.stop_reason in {
+            "refusal",
+            "content_filter",
+            "max_tokens",
+        }:
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": self._assistant_content(final_response),
+                }
+            )
+            messages.append({"role": "user", "content": _REFUSAL_RETRY_PROMPT})
+            final_response = self._create_message(messages)
+            final_text = self._collect_text(final_response)
         if not final_text.strip():
             raise AgentError(
                 f"Agent {self._agent_type!r} exceeded the maximum of "

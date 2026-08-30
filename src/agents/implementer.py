@@ -334,6 +334,7 @@ class ImplementerAgent(BaseAgent):
                 result,
                 review_findings=review_findings,
                 subtask=subtask,
+                attempt_failure_note=attempt_failure_note,
             )
         finally:
             self._run_session_label = None
@@ -555,6 +556,7 @@ class ImplementerAgent(BaseAgent):
         *,
         review_findings: list[str] | None,
         subtask: Subtask | None,
+        attempt_failure_note: str | None = None,
     ) -> ImplementationResult:
         """Ensure claimed files exist on GitHub and commits match reality."""
         repo = self._working_repo
@@ -575,7 +577,10 @@ class ImplementerAgent(BaseAgent):
                 '{"status": "committed"} before returning final JSON.'
             )
 
-        if review_findings and not self._committed_paths:
+        require_commit_for_findings = bool(review_findings) and not _is_reviewer_infra_retry(
+            attempt_failure_note
+        )
+        if require_commit_for_findings and not self._committed_paths:
             raise AgentError(
                 "Reviewer findings require code changes but no successful edit_file "
                 "commit was made this session. Address each finding with edit_file."
@@ -585,7 +590,7 @@ class ImplementerAgent(BaseAgent):
             subtask is not None
             and not claimed
             and not self._committed_paths
-            and review_findings
+            and require_commit_for_findings
         ):
             raise AgentError(
                 f"Subtask {subtask.name!r} still has open reviewer findings but "
@@ -604,6 +609,23 @@ class ImplementerAgent(BaseAgent):
 def _normalize_repo_path(path: str) -> str:
     """Normalize a repository-relative path."""
     return path.replace("\\", "/").lstrip("/")
+
+
+def _is_reviewer_infra_retry(note: str | None) -> bool:
+    """Return True when the prior round failed in review infrastructure, not code."""
+    if not note:
+        return False
+    lowered = note.lower()
+    markers = (
+        "reviewer could not finish",
+        "stop_reason='refusal'",
+        "stop_reason=\"refusal\"",
+        "stop_reason=refusal",
+        "content_filter",
+        "reviewer failed",
+        "exceeded the maximum",
+    )
+    return any(marker in lowered for marker in markers)
 
 
 def _require_str(tool_input: dict[str, Any], key: str) -> str:

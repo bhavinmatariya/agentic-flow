@@ -285,6 +285,7 @@ class ImplementationOrchestrator:
         last_review: ReviewResult | None = None
         last_implementation: ImplementationResult | None = None
         last_round_failure_note: str | None = None
+        last_review_failed: bool = False
 
         for round_index in range(1, self._max_rounds_per_subtask + 1):
             self._logger.info(
@@ -296,11 +297,17 @@ class ImplementationOrchestrator:
                 issue_number,
             )
             review_findings: list[str] | None = None
-            if last_review is not None and last_review.findings:
+            if (
+                last_review is not None
+                and not last_review.approved
+                and last_review.findings
+                and not last_review_failed
+            ):
                 review_findings = list(last_review.findings)
 
             round_failure_note = last_round_failure_note
             last_round_failure_note = None
+            last_review_failed = False
 
             implement_detail = (
                 f"subtask {subtask_index}/{subtask_total} · "
@@ -383,8 +390,10 @@ class ImplementationOrchestrator:
                     issue_number,
                     short_error,
                 )
+                last_review_failed = True
                 last_round_failure_note = (
-                    f"Your previous attempt failed with: {short_error}. Try again."
+                    f"Reviewer could not finish last round ({short_error}). "
+                    "Re-run your implementation if needed, then the reviewer will try again."
                 )
                 history.append(
                     {

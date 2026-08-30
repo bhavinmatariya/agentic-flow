@@ -281,6 +281,22 @@ class ReviewerAgent(BaseAgent):
             review = self.run(user_message, ReviewResult)
             review = _normalize_skipped_ui_verification(review)
             return _merge_automated_checks(review, automated_checks)
+        except AgentError as exc:
+            if _is_review_agent_failure(exc):
+                self._logger.warning(
+                    "Reviewer agent failed after retries: %s",
+                    exc,
+                )
+                return ReviewResult(
+                    approved=False,
+                    summary=(
+                        "Automated review could not finish; another review round "
+                        "should be attempted."
+                    ),
+                    findings=[],
+                    making_progress=True,
+                )
+            raise
         except EnvironmentSetupError as exc:
             self._logger.warning(
                 "Live verification environment setup failed: %s",
@@ -1096,6 +1112,19 @@ def _build_tool_definitions(*, include_live: bool = True) -> list[dict[str, Any]
         ]
     )
     return tools
+
+
+def _is_review_agent_failure(exc: AgentError) -> bool:
+    """Return True when the reviewer model failed to emit structured output."""
+    message = str(exc).lower()
+    markers = (
+        "refusal",
+        "content_filter",
+        "returned no text",
+        "exceeded the maximum",
+        "stop_reason",
+    )
+    return any(marker in message for marker in markers)
 
 
 def _require_str(tool_input: dict[str, Any], key: str) -> str:
