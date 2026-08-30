@@ -2,7 +2,7 @@
 # Triggers the agentic-flow reusable action when someone comments on an issue.
 #
 # Bot comments (subtask plan, diagnostics, state markers) must NOT start new runs.
-# The job `if:` skips them before checkout/install; main.py also noops as backup.
+# Repo-wide concurrency ensures only one pipeline run at a time per repository.
 name: Agent on issue comment
 
 on:
@@ -10,7 +10,7 @@ on:
     types: [created]
 
 concurrency:
-  group: agentic-flow-issue-${{ github.event.issue.number }}
+  group: agentic-flow-repo-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -20,8 +20,9 @@ jobs:
       !contains(github.event.comment.body, 'agentic-flow:auto')
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       issues: write
+      pull-requests: write
     steps:
       - name: Run agentic-flow on comment
         uses: bhavinmatariya/agentic-flow@main

@@ -16,6 +16,9 @@ inputs:
   comment-author:
     required: false
     default: ''
+  live-verification-enabled:
+    required: false
+    default: 'false'
 runs:
   using: 'composite'
   steps:
@@ -47,9 +50,10 @@ runs:
 
     - name: Install Playwright browser
       if: >
-        inputs.event != 'issue_comment' ||
-        (!contains(inputs.comment-body, 'agentic-flow:auto') &&
-         inputs.comment-author != 'github-actions[bot]')
+        (inputs.event != 'issue_comment' ||
+         (!contains(inputs.comment-body, 'agentic-flow:auto') &&
+          inputs.comment-author != 'github-actions[bot]')) &&
+        inputs.live-verification-enabled == 'true'
       run: python -m playwright install --with-deps chromium
       shell: bash
 
@@ -66,6 +70,8 @@ runs:
         ISSUE_NUMBER: ${{ inputs.issue-number }}
         EVENT_NAME: ${{ inputs.event }}
         COMMENT_AUTHOR: ${{ inputs.comment-author }}
+        LIVE_VERIFICATION_ENABLED: ${{ inputs.live-verification-enabled }}
+        ANTHROPIC_FALLBACK_MODEL: claude-sonnet-4-20250514
       run: |
         python "${{ github.action_path }}/main.py" \
           --event "$EVENT_NAME" \

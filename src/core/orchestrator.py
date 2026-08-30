@@ -12,15 +12,8 @@ from agents.implementer import ImplementerAgent
 from agents.reviewer import ReviewerAgent
 from agents.task_decomposer import TaskDecomposerAgent
 from core.exceptions import AgentError
-from core.models import (
-    Approach,
-    ImplementationResult,
-    Investigation,
-    Proposal,
-    ReviewResult,
-    Subtask,
-    SubtaskPlan,
-)
+from core.models import Approach, ImplementationResult, Investigation, Proposal, ReviewResult, Subtask, SubtaskPlan
+from core.repository_session import RepositorySession
 from core.pipeline_state import format_state_comment, format_subtask_plan_comment
 from utils.logger import RunReporter, get_logger
 
@@ -93,6 +86,11 @@ class ImplementationOrchestrator:
         branch_name = existing_branch or f"agent/fix-issue-{issue_number}"
         self._ensure_fix_branch(branch_name)
 
+        repo_session = self._implementer.create_repository_session(
+            primary_repo,
+            branch_name,
+        )
+
         decompose_ctx = (
             reporter.stage("PLANNING", 10) if reporter is not None else nullcontext()
         )
@@ -156,6 +154,7 @@ class ImplementationOrchestrator:
                 is_final_subtask=is_final,
                 human_approval_text=human_approval_text,
                 existing_branch=branch_name,
+                repo_session=repo_session,
                 history=history,
                 reporter=reporter,
             )
@@ -278,6 +277,7 @@ class ImplementationOrchestrator:
         is_final_subtask: bool,
         human_approval_text: str | None,
         existing_branch: str,
+        repo_session: RepositorySession,
         history: list[dict[str, Any]],
         reporter: RunReporter | None,
     ) -> _SubtaskOutcome:
@@ -335,6 +335,7 @@ class ImplementationOrchestrator:
                         subtask=subtask,
                         subtask_index=subtask_index,
                         subtask_total=subtask_total,
+                        repo_session=repo_session,
                     )
             except Exception as exc:
                 short_error = _short_error(exc)
@@ -371,6 +372,7 @@ class ImplementationOrchestrator:
                         subtask_index=subtask_index,
                         subtask_total=subtask_total,
                         is_final_subtask=is_final_subtask,
+                        repo_session=repo_session,
                     )
             except Exception as exc:
                 short_error = _short_error(exc)

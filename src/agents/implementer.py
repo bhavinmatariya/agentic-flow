@@ -11,8 +11,10 @@ from agents.base_agent import BaseAgent
 from config import Settings
 from core.exceptions import AgentError, ToolError
 from core.models import Approach, ImplementationResult, Investigation, Subtask
+from core.repository_session import RepositorySession
 from tools.code_editor import CodeEditTool
 from tools.code_search import CodeSearchTool
+from tools.environment_manager import checkout_git_branch
 
 IMPLEMENTER_SYSTEM_PROMPT: Final[str] = (
     "You are implementing an already-approved fix. You have been given "
@@ -53,7 +55,10 @@ IMPLEMENTER_SYSTEM_PROMPT: Final[str] = (
     "successful edit_file call in this session before you return final JSON. "
     "Never claim a file was added or changed without a successful edit_file "
     "response {\"status\": \"committed\"}. If edit_file returns an error, fix "
-    "and retry — do not return success JSON anyway.\n\n"
+    "and retry — do not return success JSON anyway.\n"
+    "11. read_file returns LIVE content from the working branch on GitHub — "
+    "use that exact text as old_string for edit_file. If edit_file says "
+    "old_string was not found, call read_file again on that path before retrying.\n\n"
     "When finished, respond with ONLY JSON: {\"branch_name\": str, "
     "\"files_changed\": [str], \"summary\": str}"
 )
@@ -199,11 +204,29 @@ class ImplementerAgent(BaseAgent):
         self._github_token = github_token.strip()
         if not self._github_token:
             raise AgentError("github_token must not be empty")
+        self._max_tool_turns = 40
         self.system_prompt = IMPLEMENTER_SYSTEM_PROMPT
         self.tool_definitions = list(IMPLEMENTER_TOOL_DEFINITIONS)
         self._committed_paths: set[str] = set()
         self._working_repo: str = ""
         self._working_branch: str = ""
+        self._local_repo_path: str = ""
+        self._edit_failures: dict[str, int] = {}
+        self._active_repo_session: RepositorySession | None = None
+
+    def create_repository_session(
+        self,
+        primary_repo: str,
+        branch_name: str,
+    ) -> RepositorySession:
+        """Open a single local checkout for an orchestrator run."""
+        return RepositorySession.open(
+            code_search=self._code_search,
+            repo_full_name=primary_repo,
+            branch_name=branch_name,
+            github_token=self._github_token,
+            logger=self._logger,
+        )
 
     def implement(
         self,
@@ -219,6 +242,7 @@ class ImplementerAgent(BaseAgent):
         subtask: Subtask | None = None,
         subtask_index: int | None = None,
         subtask_total: int | None = None,
+        repo_session: RepositorySession | None = None,
     ) -> ImplementationResult:
         """Apply ``approach`` on a dedicated branch and return the outcome.
 
@@ -263,13 +287,27 @@ class ImplementerAgent(BaseAgent):
             session_parts.append(f"subtask {subtask_index}/{subtask_total}")
         self._run_session_label = " · ".join(session_parts)
         self._committed_paths = set()
+        self._edit_failures = {}
         self._working_repo = primary_repo
         self._working_branch = branch_name
+        self._active_repo_session = repo_session
         try:
-            local_repo_path = self._code_search.clone_repo(
-                primary_repo,
-                self._github_token,
-            )
+            if repo_session is not None:
+                local_repo_path = repo_session.local_repo_path
+                self._local_repo_path = local_repo_path
+            else:
+                local_repo_path = self._code_search.clone_repo(
+                    primary_repo,
+                    self._github_token,
+                )
+                self._local_repo_path = local_repo_path
+                checkout_git_branch(
+                    local_repo_path,
+                    branch_name,
+                    primary_repo,
+                    self._github_token,
+                    logger=self._logger,
+                )
             user_message = self._build_user_message(
                 issue=issue,
                 investigation=investigation,
@@ -300,8 +338,11 @@ class ImplementerAgent(BaseAgent):
         finally:
             self._run_session_label = None
             self._committed_paths = set()
+            self._edit_failures = {}
             self._working_repo = ""
             self._working_branch = ""
+            self._local_repo_path = ""
+            self._active_repo_session = None
 
     def _build_user_message(
         self,
@@ -393,8 +434,9 @@ class ImplementerAgent(BaseAgent):
             f"- Risk: {approach.risk}\n"
             f"- Tradeoffs: {approach.tradeoffs}\n"
             f"- Estimated scope: {approach.estimated_scope}\n\n"
-            "Use read_file and search_code against the local checkout to inspect "
-            "code. Use edit_file with repo, branch, path, and exact old_string "
+            "Use read_file to fetch LIVE file content from the working branch on "
+            "GitHub (required for accurate old_string values). Use search_code "
+            "against the local checkout to explore the codebase. Use edit_file "
             "values to commit surgical changes on GitHub. To create a new file, "
             "pass old_string as \"\" and new_string as the full file content.\n\n"
             f"Set branch_name to {branch_name!r} in your final JSON. "
@@ -406,9 +448,22 @@ class ImplementerAgent(BaseAgent):
         """Route Claude tool calls to search/edit helpers."""
         try:
             if tool_name == "read_file":
+                path = _normalize_repo_path(_require_str(tool_input, "relative_path"))
+                if self._working_repo and self._working_branch:
+                    try:
+                        return self._code_edit.read_branch_file(
+                            self._working_repo,
+                            self._working_branch,
+                            path,
+                        )
+                    except ToolError as exc:
+                        return json.dumps(
+                            {"error": f"{type(exc).__name__}: {exc}"},
+                            ensure_ascii=False,
+                        )
                 return self._code_search.read_file(
                     _require_str(tool_input, "local_repo_path"),
-                    _require_str(tool_input, "relative_path"),
+                    path,
                 )
 
             if tool_name == "search_code":
@@ -423,15 +478,35 @@ class ImplementerAgent(BaseAgent):
 
             if tool_name == "edit_file":
                 path = _normalize_repo_path(_require_str(tool_input, "path"))
-                self._code_edit.edit_file(
-                    _require_str(tool_input, "repo"),
-                    _require_str(tool_input, "branch"),
-                    path,
-                    _require_str(tool_input, "old_string"),
-                    tool_input.get("new_string", ""),
-                    _require_str(tool_input, "commit_message"),
-                )
+                try:
+                    self._code_edit.edit_file(
+                        _require_str(tool_input, "repo"),
+                        _require_str(tool_input, "branch"),
+                        path,
+                        _require_str(tool_input, "old_string"),
+                        tool_input.get("new_string", ""),
+                        _require_str(tool_input, "commit_message"),
+                    )
+                except ToolError as exc:
+                    failures = self._edit_failures.get(path, 0) + 1
+                    self._edit_failures[path] = failures
+                    hint = (
+                        " Call read_file on this path to load current GitHub "
+                        "branch content, then retry edit_file with an exact "
+                        "old_string match."
+                    )
+                    if failures >= 3:
+                        hint += (
+                            " This path failed 3+ times — simplify the edit "
+                            "or use smaller old_string snippets with more context."
+                        )
+                    return json.dumps(
+                        {"error": f"{type(exc).__name__}: {exc}{hint}"},
+                        ensure_ascii=False,
+                    )
                 self._committed_paths.add(path)
+                self._edit_failures.pop(path, None)
+                self._refresh_local_checkout()
                 return json.dumps(
                     {"status": "committed", "path": path},
                     ensure_ascii=False,
@@ -446,6 +521,33 @@ class ImplementerAgent(BaseAgent):
             {"error": f"Unknown tool: {tool_name!r}"},
             ensure_ascii=False,
         )
+
+    def _refresh_local_checkout(self) -> None:
+        """Sync the shared checkout after a GitHub commit."""
+        if self._active_repo_session is not None:
+            try:
+                self._active_repo_session.sync(logger=self._logger)
+            except Exception as exc:
+                self._logger.warning(
+                    "Could not sync repository session after commit: %s",
+                    exc,
+                )
+            return
+        if not self._local_repo_path or not self._working_branch:
+            return
+        try:
+            checkout_git_branch(
+                self._local_repo_path,
+                self._working_branch,
+                self._working_repo,
+                self._github_token,
+                logger=self._logger,
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "Could not refresh local checkout after commit: %s",
+                exc,
+            )
 
     def _validate_implementation(
         self,

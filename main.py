@@ -66,6 +66,24 @@ def _default_fix_branch(issue_number: int) -> str:
     return f"agent/fix-issue-{issue_number}"
 
 
+def _assert_repo_pipeline_available(
+    adapter: GitHubAdapter,
+    issue_number: int,
+) -> None:
+    """Refuse to start when another issue in this repo already has in-progress work."""
+    active = adapter.list_open_issue_numbers_with_label(IN_PROGRESS_LABEL)
+    others = [number for number in active if number != issue_number]
+    if not others:
+        return
+    preview = ", ".join(f"#{number}" for number in others[:5])
+    if len(others) > 5:
+        preview += f" (+{len(others) - 5} more)"
+    raise AgentError(
+        f"Cannot start issue #{issue_number}: the agent is already running on "
+        f"{preview}. Wait until that run completes, then try again."
+    )
+
+
 def _post_proposal_state(
     adapter: GitHubAdapter,
     issue_number: int,
@@ -567,6 +585,7 @@ def _handle_resume(
     investigation = state.investigation
     approach = state.approach
     branch = state.branch
+    _assert_repo_pipeline_available(adapter, issue_number)
     logger.info(
         "Resuming issue #%s from saved state on branch %r (approach=%r)",
         issue_number,
@@ -642,6 +661,7 @@ def _handle_approval(
     reporter: RunReporter,
 ) -> int:
     """Run implement → review → PR after a human approves an approach."""
+    _assert_repo_pipeline_available(adapter, issue_number)
     adapter.remove_label(issue_number, AWAITING_APPROVAL_LABEL)
     adapter.add_label(issue_number, IN_PROGRESS_LABEL)
 

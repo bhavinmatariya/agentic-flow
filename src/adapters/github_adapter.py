@@ -315,3 +315,25 @@ class GitHubAdapter(IssueProviderAdapter):
             "title": pr.title,
             "state": pr.state,
         }
+
+    def list_open_issue_numbers_with_label(self, label: str) -> list[int]:
+        """Return open issue numbers that currently have ``label``."""
+        normalized = label.strip()
+        if not normalized:
+            return []
+
+        def _fetch() -> list[int]:
+            issues = self._repo.get_issues(state="open", labels=[normalized])
+            return sorted({int(issue.number) for issue in issues})
+
+        result = self._wrap(
+            f"list_open_issue_numbers_with_label({normalized!r})",
+            _fetch,
+        )
+        logger.debug(
+            "Found %d open issue(s) with label %r in %s",
+            len(result),
+            normalized,
+            self._settings.github_repo,
+        )
+        return result

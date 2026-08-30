@@ -253,6 +253,23 @@ class CodeEditTool:
         except AdapterError:
             return False
 
+    def read_branch_file(self, repo: str, branch: str, path: str) -> str:
+        """Read live UTF-8 file content from GitHub at ``branch`` (edit source of truth)."""
+        self._ensure_commit_target(repo)
+        normalized_path = path.replace("\\", "/").lstrip("/")
+        if not normalized_path:
+            raise ToolError("path must be a non-empty repository-relative file path")
+        try:
+            return self._adapter.get_file_content(repo, normalized_path, branch)
+        except AdapterError as exc:
+            raise ToolError(
+                _format_tool_error(
+                    "get_file_content",
+                    exc,
+                    context=f"{repo}:{normalized_path}@{branch}",
+                )
+            ) from exc
+
 
 def _is_new_file_edit(old_string: str) -> bool:
     """Return True when ``edit_file`` should create a file instead of patching."""

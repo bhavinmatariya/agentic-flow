@@ -27,6 +27,12 @@ _JSON_RETRY_PROMPT: Final[str] = (
     "Your last response was not valid JSON. Respond with ONLY a single valid "
     "JSON object matching the required schema — no prose before or after."
 )
+_FORCE_JSON_PROMPT: Final[str] = (
+    "You have used all allowed tool steps. Do NOT call any more tools. "
+    "Respond with ONLY the final JSON object required by your instructions — "
+    "no prose, no markdown fences."
+)
+_TURN_LIMIT_WARNING_AT: int = 20
 
 
 class BaseAgent(ABC):
@@ -68,6 +74,7 @@ class BaseAgent(ABC):
         self.system_prompt = ""
         self.tool_definitions = []
         self._run_session_label: str | None = None
+        self._max_tool_turns = _MAX_TURNS
 
     @abstractmethod
     def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
@@ -83,7 +90,18 @@ class BaseAgent(ABC):
             {"role": "user", "content": user_message},
         ]
 
-        for turn in range(1, _MAX_TURNS + 1):
+        for turn in range(1, self._max_tool_turns + 1):
+            if turn == _TURN_LIMIT_WARNING_AT:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"You are on tool step {turn}/{self._max_tool_turns}. "
+                            "Finish soon: complete remaining edit_file calls, then "
+                            "return ONLY the final JSON object."
+                        ),
+                    }
+                )
             response = self._create_message(messages)
             stop_reason = response.stop_reason
 
@@ -94,7 +112,7 @@ class BaseAgent(ABC):
                     self._agent_type,
                     session,
                     turn,
-                    _MAX_TURNS,
+                    self._max_tool_turns,
                 )
                 messages.append(
                     {"role": "assistant", "content": self._assistant_content(response)}
@@ -108,7 +126,7 @@ class BaseAgent(ABC):
                 self._logger.debug(
                     "Tool-use turn %d/%d complete; continuing",
                     turn,
-                    _MAX_TURNS,
+                    self._max_tool_turns,
                 )
                 continue
 
@@ -144,11 +162,29 @@ class BaseAgent(ABC):
                 )
             return self._finalize_json_response(response, messages, output_model)
 
-        raise AgentError(
-            f"Agent {self._agent_type!r} exceeded the maximum of {_MAX_TURNS} "
-            "tool-use turns without returning final JSON. The model may be "
-            "stuck in a tool loop; inspect recent tool errors and retry."
+        self._logger.warning(
+            "Agent %s hit tool turn limit (%d); requesting final JSON only",
+            self._agent_type,
+            self._max_tool_turns,
         )
+        messages.append({"role": "user", "content": _FORCE_JSON_PROMPT})
+        final_response = self._create_message(messages)
+        if final_response.stop_reason == "tool_use":
+            raise AgentError(
+                f"Agent {self._agent_type!r} exceeded the maximum of "
+                f"{self._max_tool_turns} tool-use turns without returning final "
+                "JSON. The model may be stuck in a tool loop; inspect recent "
+                "tool errors and retry."
+            )
+        final_text = self._collect_text(final_response)
+        if not final_text.strip():
+            raise AgentError(
+                f"Agent {self._agent_type!r} exceeded the maximum of "
+                f"{self._max_tool_turns} tool-use turns without returning final "
+                "JSON. The model may be stuck in a tool loop; inspect recent "
+                "tool errors and retry."
+            )
+        return self._finalize_json_response(final_response, messages, output_model)
 
     def _create_message(self, messages: list[dict[str, Any]]) -> Any:
         """Call Claude through the centralized client."""

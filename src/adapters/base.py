@@ -103,3 +103,7 @@ class IssueProviderAdapter(ABC):
         Returns:
             A dictionary with PR metadata (``number``, ``url``, ``title``, etc.).
         """
+
+    @abstractmethod
+    def list_open_issue_numbers_with_label(self, label: str) -> list[int]:
+        """Return issue numbers for open issues that have ``label``."""

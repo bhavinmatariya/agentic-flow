@@ -15,6 +15,7 @@ from agents.base_agent import BaseAgent
 from config import Settings
 from core.exceptions import AgentError, EnvironmentSetupError, ToolError
 from core.models import ImplementationResult, Investigation, ReviewResult, Subtask
+from core.repository_session import RepositorySession
 from tools.browser_test import (
     BrowserLaunchError,
     BrowserTestTool,
@@ -210,16 +211,21 @@ class ReviewerAgent(BaseAgent):
         subtask_index: int | None = None,
         subtask_total: int | None = None,
         is_final_subtask: bool = True,
+        repo_session: RepositorySession | None = None,
     ) -> ReviewResult:
         """Review ``implementation`` on its branch and return a :class:`ReviewResult`."""
-        local_repo_path = self._code_search.clone_repo(primary_repo, self._github_token)
-        checkout_git_branch(
-            local_repo_path,
-            implementation.branch_name,
-            primary_repo,
-            self._github_token,
-            logger=self._logger,
-        )
+        if repo_session is not None:
+            repo_session.sync(logger=self._logger)
+            local_repo_path = repo_session.local_repo_path
+        else:
+            local_repo_path = self._code_search.clone_repo(primary_repo, self._github_token)
+            checkout_git_branch(
+                local_repo_path,
+                implementation.branch_name,
+                primary_repo,
+                self._github_token,
+                logger=self._logger,
+            )
         layers = detect_change_layers(implementation.files_changed)
         automated_checks = run_automated_checks(
             local_repo_path,
