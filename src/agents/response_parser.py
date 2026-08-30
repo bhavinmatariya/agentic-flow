@@ -15,9 +15,22 @@ RESPONSE_PARSER_SYSTEM_PROMPT: Final[str] = (
     "You are reading a human's reply on a GitHub issue where they were "
     "shown one or more proposed fix approaches. Determine their intent — "
     "approve (and which approach, matched by name or clear reference, "
-    "even if worded loosely), revise (they want changes or raised new "
-    "info), or unrelated (general chat, not a decision). Respond with "
-    "ONLY JSON: {\"intent\": ..., \"selected_approach\": ..., "
+    "even if worded loosely), revise (they reject the proposal(s) and "
+    "want different options before proceeding), or unrelated (general "
+    "chat, not a decision).\n\n"
+    "IMPORTANT: If the human accepts or approves the proposed approach in "
+    "principle but also adds extra requirements, tweaks, or conditions "
+    "(phrases like \"approved with changes:\", \"go with option X but "
+    "also...\", \"yes, and also make it...\", \"approved — please also "
+    "...\"), classify as intent=\"approve\" with selected_approach set and "
+    "the extra requirements captured in feedback. That is NOT revise.\n\n"
+    "Reserve intent=\"revise\" ONLY when the human rejects the proposed "
+    "approach(es) entirely or asks for different/additional options before "
+    "proceeding — e.g. \"I don't like either of these, what else could "
+    "work?\", \"none of these are right\", or \"can you propose other "
+    "alternatives?\". Do not use revise when they picked an option and "
+    "added implementation details.\n\n"
+    "Respond with ONLY JSON: {\"intent\": ..., \"selected_approach\": ..., "
     "\"feedback\": ...}"
 )
 
@@ -88,7 +101,9 @@ class ResponseParserAgent(BaseAgent):
             f"Human reply:\n{human_comment}\n\n"
             "Respond with only the JSON object specified in your instructions. "
             "Set selected_approach when intent is approve (null otherwise). "
-            "Set feedback only when intent is revise (null otherwise)."
+            "Set feedback when intent is revise (required) or approve with "
+            "extra requirements or tweaks (optional). Set feedback to null "
+            "for unrelated or plain approve with no extra requirements."
         )
 
     def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:

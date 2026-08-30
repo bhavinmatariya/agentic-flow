@@ -185,8 +185,9 @@ class ParsedIntent(BaseModel):
             something unrelated to choosing an approach.
         selected_approach: Name or reference to the chosen approach when
             ``intent`` is ``approve``; otherwise ``None``.
-        feedback: Revision notes when ``intent`` is ``revise``; must be
-            ``None`` for all other intents.
+        feedback: Revision notes when ``intent`` is ``revise`` (required), or
+            extra requirements when ``intent`` is ``approve`` (optional).
+            Must be ``None`` for ``unrelated`` and plain approve with no extras.
     """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -197,13 +198,13 @@ class ParsedIntent(BaseModel):
 
     @model_validator(mode="after")
     def _validate_feedback_for_intent(self) -> ParsedIntent:
-        """Ensure ``feedback`` is present only for revision intents."""
+        """Ensure ``feedback`` matches the parsed intent."""
         if self.intent == "revise":
             if self.feedback is None or not self.feedback.strip():
                 raise ValueError("feedback must be set when intent is 'revise'")
             return self
-        if self.feedback is not None:
-            raise ValueError("feedback must be null unless intent is 'revise'")
+        if self.intent == "unrelated" and self.feedback is not None:
+            raise ValueError("feedback must be null when intent is 'unrelated'")
         return self
 
 

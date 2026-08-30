@@ -284,21 +284,32 @@ def _handle_issue_comment(
             return 0
 
         if parsed.intent == "revise":
-            with reporter.stage("PROPOSING", 50):
-                adapter.post_comment(
-                    issue_number,
-                    (
-                        "Thanks — we received your feedback and will use it when "
-                        "preparing a revised proposal.\n\n"
-                        f"> {parsed.feedback}"
-                    ),
+            with reporter.stage("INVESTIGATING", 30):
+                investigation = agents.investigator.investigate(
+                    issue["title"],
+                    issue["body"],
+                    settings.github_repo,
                 )
+            with reporter.stage("PROPOSING", 60):
+                proposal = agents.proposer.propose(
+                    investigation,
+                    revision_feedback=parsed.feedback,
+                )
+                revised_comment_body = agents.proposer.format_as_comment(
+                    proposal,
+                    investigation,
+                )
+                comment = adapter.post_comment(issue_number, revised_comment_body)
                 logger.info(
-                    "Recorded revision feedback on issue #%s; label unchanged",
+                    "Posted revised proposal on issue #%s (comment id=%s, "
+                    "approaches=%d); %r label kept",
                     issue_number,
+                    comment["id"],
+                    len(proposal.approaches),
+                    AWAITING_APPROVAL_LABEL,
                 )
-            reporter.record_outcome_noop(
-                f"Revision feedback recorded on issue #{issue_number}"
+            reporter.record_outcome_proposal_posted(
+                approaches=len(proposal.approaches)
             )
             return 0
 

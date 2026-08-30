@@ -78,11 +78,19 @@ class ProposerAgent(BaseAgent):
         self.system_prompt = PROPOSER_SYSTEM_PROMPT
         self.tool_definitions = []
 
-    def propose(self, investigation: Investigation) -> Proposal:
+    def propose(
+        self,
+        investigation: Investigation,
+        *,
+        revision_feedback: str | None = None,
+    ) -> Proposal:
         """Build approaches from ``investigation`` and return a :class:`Proposal`.
 
         Args:
             investigation: Validated findings from the investigator agent.
+            revision_feedback: Optional human feedback when revising a prior
+                proposal; included in the user message so new options address
+                what they rejected or asked to change.
 
         Returns:
             A validated proposal with one or more approaches.
@@ -90,7 +98,10 @@ class ProposerAgent(BaseAgent):
         Raises:
             AgentError: If Claude fails or the structured output is invalid.
         """
-        user_message = self._build_user_message(investigation)
+        user_message = self._build_user_message(
+            investigation,
+            revision_feedback=revision_feedback,
+        )
         return self.run(user_message, Proposal)
 
     def format_as_comment(
@@ -147,7 +158,12 @@ class ProposerAgent(BaseAgent):
         lines.append(closing)
         return "\n".join(lines).strip()
 
-    def _build_user_message(self, investigation: Investigation) -> str:
+    def _build_user_message(
+        self,
+        investigation: Investigation,
+        *,
+        revision_feedback: str | None = None,
+    ) -> str:
         """Serialize investigation fields into a readable user turn."""
         if investigation.evidence:
             evidence_block = "\n".join(f"- {item}" for item in investigation.evidence)
@@ -169,7 +185,7 @@ class ProposerAgent(BaseAgent):
         else:
             questions_block = "(none)"
 
-        return (
+        message = (
             "Propose fix/build approaches based on this investigation.\n\n"
             f"Issue nature:\n{investigation.issue_nature}\n\n"
             f"Root cause:\n{investigation.root_cause}\n\n"
@@ -177,8 +193,18 @@ class ProposerAgent(BaseAgent):
             f"Relevant files:\n{files_block}\n\n"
             f"Confidence: {investigation.confidence}\n\n"
             f"Open questions:\n{questions_block}\n\n"
+        )
+        if revision_feedback and revision_feedback.strip():
+            message += (
+                "Human revision feedback (they rejected the previous proposal "
+                "or asked for different options — address this directly in "
+                "your new approaches):\n"
+                f"{revision_feedback.strip()}\n\n"
+            )
+        message += (
             "Respond with only the JSON object specified in your instructions."
         )
+        return message
 
     def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """Refuse tool calls; this agent does not expose any tools."""
