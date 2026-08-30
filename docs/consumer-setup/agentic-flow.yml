@@ -1,0 +1,40 @@
+# Copy this file into your app repository:
+#   .github/workflows/agentic-flow.yml
+#
+# Requires secrets: ANTHROPIC_API_KEY, AGENT_GITHUB_TOKEN
+# Optional cross-repo config: repos.json at your repo root (see repos.json.example)
+
+name: Run Agentic Flow
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: agentic-flow-repo-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  run-agent:
+    if: >
+      github.event_name == 'issues' ||
+      (github.event.comment.user.type != 'Bot' &&
+       !contains(github.event.comment.body, 'agentic-flow:auto'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Run agentic-flow
+        uses: bhavinmatariya/agentic-flow@main
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github-token: ${{ secrets.AGENT_GITHUB_TOKEN }}
+          issue-number: ${{ github.event.issue.number }}
+          event: ${{ github.event_name == 'issues' && 'issue_opened' || 'issue_comment' }}
+          comment-body: ${{ github.event.comment.body }}
+          comment-author: ${{ github.event.comment.user.login }}

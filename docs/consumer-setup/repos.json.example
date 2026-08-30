@@ -2,7 +2,7 @@
   "linked": [
     {
       "name": "backend",
-      "repo": "bhavinmatariya/slack-integration"
+      "repo": "your-org/your-backend-repo"
     }
   ]
 }
