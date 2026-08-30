@@ -12,7 +12,16 @@ from agents.implementer import ImplementerAgent
 from agents.reviewer import ReviewerAgent
 from agents.task_decomposer import TaskDecomposerAgent
 from core.exceptions import AgentError
-from core.models import Approach, ImplementationResult, Investigation, Proposal, ReviewResult, Subtask, SubtaskPlan
+from core.models import (
+    RECOMMENDED_MAX_SUBTASKS,
+    Approach,
+    ImplementationResult,
+    Investigation,
+    Proposal,
+    ReviewResult,
+    Subtask,
+    SubtaskPlan,
+)
 from core.repository_session import RepositorySession
 from core.pipeline_state import format_state_comment, format_subtask_plan_comment
 from utils.logger import RunReporter, get_logger
@@ -107,6 +116,13 @@ class ImplementationOrchestrator:
                     approach,
                     human_approval_text=human_approval_text,
                 )
+                if len(subtask_plan.subtasks) > RECOMMENDED_MAX_SUBTASKS:
+                    self._logger.warning(
+                        "Decomposer returned %d subtasks (recommended max is %d); "
+                        "consider splitting the issue for reliability.",
+                        len(subtask_plan.subtasks),
+                        RECOMMENDED_MAX_SUBTASKS,
+                    )
                 self._adapter.post_comment(
                     issue_number,
                     format_subtask_plan_comment(subtask_plan, approach.name),
@@ -809,7 +825,7 @@ class ImplementationOrchestrator:
             [
                 "",
                 "The issue has been labeled **`agent:needs-human`**. "
-                "Comment **continue** to resume from the saved subtask progress, "
+                "Comment **continue** or **retry** to resume from the saved subtask progress, "
                 "or inspect the branch and take over manually.",
             ]
         )

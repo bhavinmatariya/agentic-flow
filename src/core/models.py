@@ -195,12 +195,16 @@ class Subtask(BaseModel):
     order: int = Field(..., ge=1)
 
 
+MAX_SUBTASKS = 8
+RECOMMENDED_MAX_SUBTASKS = 5
+
+
 class SubtaskPlan(BaseModel):
     """Ordered subtasks covering an approved approach end-to-end."""
 
     model_config = ConfigDict(extra="forbid")
 
-    subtasks: list[Subtask] = Field(..., min_length=1, max_length=5)
+    subtasks: list[Subtask] = Field(..., min_length=1, max_length=MAX_SUBTASKS)
 
     @model_validator(mode="after")
     def _sort_subtasks(self) -> SubtaskPlan:

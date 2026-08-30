@@ -32,7 +32,7 @@ from agents.reviewer import ReviewerAgent
 from agents.task_decomposer import TaskDecomposerAgent
 from config import ConfigurationError, Settings
 from core.exceptions import AgentError
-from core.models import Approach, Investigation, ParsedIntent, Proposal, SubtaskPlan
+from core.models import Approach, Investigation, ParsedIntent, Proposal, SubtaskPlan, MAX_SUBTASKS
 from core.pipeline_state import (
     RESTART_INVESTIGATION_MODE,
     STATE_MARKER,
@@ -220,7 +220,8 @@ def _post_unhandled_pipeline_failure(
         f"{plain}\n\n"
         f"**Details:** {short}\n\n"
         "The issue has been labeled **`agent:needs-human`**. "
-        "Please check the workflow logs for full details and retry or take over manually."
+        "Comment **continue** or **retry** on the issue to resume saved progress, "
+        "or check the workflow logs for full details."
     )
 
     if adapter is None:
@@ -386,6 +387,12 @@ def _handle_issue_comment(
         return 0
 
     if adapter.has_label(issue_number, NEEDS_HUMAN_LABEL):
+        logger.info(
+            "Issue #%s has %r; resuming from saved state (comment=%r)",
+            issue_number,
+            NEEDS_HUMAN_LABEL,
+            comment_body.strip()[:120],
+        )
         return _handle_resume(
             adapter=adapter,
             settings=settings,
@@ -555,7 +562,14 @@ def _handle_resume(
             f"{STATE_MARKER!r} state comment was found to resume from."
         )
 
-    state = parse_state_comment(str(state_comment["body"]))
+    try:
+        state = parse_state_comment(str(state_comment["body"]))
+    except AgentError as exc:
+        raise AgentError(
+            f"Issue #{issue_number} saved progress could not be loaded: {exc} "
+            f"(max {MAX_SUBTASKS} subtasks in stored plans)."
+        ) from exc
+
     if state.resume_mode == RESTART_INVESTIGATION_MODE:
         logger.info(
             "Issue #%s resume marker requests restart; re-running investigation",

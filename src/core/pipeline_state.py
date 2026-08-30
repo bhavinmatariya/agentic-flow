@@ -10,7 +10,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from core.exceptions import AgentError
-from core.models import Approach, Investigation, Proposal, SubtaskPlan
+from core.models import Approach, Investigation, Proposal, SubtaskPlan, MAX_SUBTASKS
 
 STATE_MARKER = "agentic-flow:state"
 RESTART_INVESTIGATION_MODE = "restart_investigation"
@@ -98,7 +98,10 @@ def parse_state_comment(body: str) -> PipelineState:
         if payload.get("subtask_plan") is not None:
             subtask_plan = SubtaskPlan.model_validate(payload.get("subtask_plan"))
     except ValidationError as exc:
-        raise AgentError(f"State comment payload failed validation: {exc}") from exc
+        raise AgentError(
+            f"State comment payload failed validation: {exc} "
+            f"(stored subtask plans support up to {MAX_SUBTASKS} items)."
+        ) from exc
 
     return PipelineState(
         branch=branch,
