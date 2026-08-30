@@ -117,6 +117,7 @@ def _post_approval_state(
     *,
     subtask_plan: SubtaskPlan | None = None,
     subtask_index: int | None = None,
+    checkpoint_completed: int | None = None,
 ) -> None:
     """Post hidden state with the human-selected approach for resume after stalls."""
     branch = _default_fix_branch(issue_number)
@@ -129,6 +130,7 @@ def _post_approval_state(
             approach=approach,
             subtask_plan=subtask_plan,
             subtask_index=subtask_index,
+            checkpoint_completed=checkpoint_completed,
         ),
     )
     logger.info(
@@ -621,6 +623,14 @@ def _handle_resume(
             f"\n\nContinuing subtask **{state.subtask_index + 1}/"
             f"{len(state.subtask_plan.subtasks)}**: {next_subtask.name}."
         )
+        if state.checkpoint_completed is not None:
+            total_checkpoints = (
+                len(state.subtask_plan.subtasks) * 3 * 2
+            )
+            resume_note += (
+                f"\n\nProgress checkpoint **{state.checkpoint_completed}/"
+                f"{total_checkpoints}** from the previous run."
+            )
     adapter.post_comment(issue_number, resume_note)
 
     with tempfile.TemporaryDirectory(prefix="agentic-flow-resume-") as tmp:
@@ -639,6 +649,7 @@ def _handle_resume(
             state.proposal,
             subtask_plan=state.subtask_plan,
             subtask_index=state.subtask_index,
+            checkpoint_completed=state.checkpoint_completed,
         )
         with reporter.stage("RESUMING", 35):
             result = agents.orchestrator.run(
@@ -652,6 +663,7 @@ def _handle_resume(
                 proposal=state.proposal,
                 subtask_plan=state.subtask_plan,
                 start_subtask_index=state.subtask_index,
+                checkpoint_completed=state.checkpoint_completed,
                 reporter=reporter,
             )
 

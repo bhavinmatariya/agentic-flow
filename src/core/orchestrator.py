@@ -88,6 +88,7 @@ class ImplementationOrchestrator:
         proposal: Proposal | None = None,
         subtask_plan: SubtaskPlan | None = None,
         start_subtask_index: int = 0,
+        checkpoint_completed: int | None = None,
         reporter: RunReporter | None = None,
     ) -> OrchestratorResult:
         """Decompose, implement each subtask, review, and open a PR when complete."""
@@ -135,13 +136,25 @@ class ImplementationOrchestrator:
                     proposal=proposal,
                     subtask_plan=subtask_plan,
                     subtask_index=0,
+                    reporter=reporter,
                 )
 
         total_subtasks = len(subtask_plan.subtasks)
+        checkpoint_budget = total_subtasks * self._max_rounds_per_subtask * 2
         if reporter is not None:
-            reporter.plan_checkpoints(
-                total_subtasks * self._max_rounds_per_subtask * 2
-            )
+            resume_at = checkpoint_completed
+            if resume_at is None and start_subtask_index > 0:
+                resume_at = start_subtask_index * self._max_rounds_per_subtask * 2
+            reporter.plan_checkpoints(checkpoint_budget, start_at=resume_at or 0)
+            if start_subtask_index > 0:
+                self._logger.info(
+                    "Resuming issue #%s at subtask %d/%d, checkpoint %d/%d",
+                    issue_number,
+                    start_subtask_index + 1,
+                    total_subtasks,
+                    reporter.checkpoint_index,
+                    reporter.checkpoint_total,
+                )
         combined_files: list[str] = []
         combined_summaries: list[str] = []
         last_review: ReviewResult | None = None
@@ -197,6 +210,7 @@ class ImplementationOrchestrator:
                     proposal=proposal,
                     subtask_plan=subtask_plan,
                     subtask_index=subtask_index,
+                    reporter=reporter,
                 )
                 return OrchestratorResult(
                     passed=False,
@@ -223,6 +237,7 @@ class ImplementationOrchestrator:
                 proposal=proposal,
                 subtask_plan=subtask_plan,
                 subtask_index=subtask_index + 1,
+                reporter=reporter,
             )
 
         if last_implementation is None or last_review is None:
@@ -707,8 +722,10 @@ class ImplementationOrchestrator:
         proposal: Proposal | None,
         subtask_plan: SubtaskPlan,
         subtask_index: int,
+        reporter: RunReporter | None = None,
     ) -> None:
         """Post hidden state so resume can continue from the next subtask."""
+        checkpoint_completed = reporter.checkpoint_index if reporter is not None else None
         self._adapter.post_comment(
             issue_number,
             format_state_comment(
@@ -718,6 +735,7 @@ class ImplementationOrchestrator:
                 proposal=proposal,
                 subtask_plan=subtask_plan,
                 subtask_index=subtask_index,
+                checkpoint_completed=checkpoint_completed,
             ),
         )
 

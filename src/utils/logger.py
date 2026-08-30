@@ -106,10 +106,20 @@ class RunReporter:
     _checkpoint_index: int = field(default=0, repr=False)
     _checkpoint_total: int = field(default=0, repr=False)
 
-    def plan_checkpoints(self, total: int) -> None:
-        """Reserve a fixed checkpoint budget for orchestrator implement/review work."""
+    def plan_checkpoints(self, total: int, *, start_at: int = 0) -> None:
+        """Reserve checkpoint budget; ``start_at`` restores progress on resume."""
         self._checkpoint_total = max(1, int(total))
-        self._checkpoint_index = 0
+        self._checkpoint_index = max(0, min(int(start_at), self._checkpoint_total - 1))
+
+    @property
+    def checkpoint_index(self) -> int:
+        """Return how many implement/review checkpoints have completed."""
+        return self._checkpoint_index
+
+    @property
+    def checkpoint_total(self) -> int:
+        """Return the planned implement/review checkpoint budget."""
+        return self._checkpoint_total
 
     def _next_checkpoint(self, detail: str) -> tuple[str, int]:
         """Advance the checkpoint counter and return label + progress percent."""

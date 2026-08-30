@@ -30,6 +30,7 @@ class PipelineState:
     approach: Approach | None = None
     subtask_plan: SubtaskPlan | None = None
     subtask_index: int = 0
+    checkpoint_completed: int | None = None
     resume_mode: str | None = None
 
 
@@ -41,6 +42,7 @@ def format_state_comment(
     approach: Approach | None = None,
     subtask_plan: SubtaskPlan | None = None,
     subtask_index: int | None = None,
+    checkpoint_completed: int | None = None,
     resume_mode: str | None = None,
 ) -> str:
     """Build a hidden state payload comment."""
@@ -57,6 +59,8 @@ def format_state_comment(
         payload["subtask_plan"] = subtask_plan.model_dump()
     if subtask_index is not None:
         payload["subtask_index"] = subtask_index
+    if checkpoint_completed is not None:
+        payload["checkpoint_completed"] = max(0, int(checkpoint_completed))
     return f"<!-- {STATE_MARKER}\n{json.dumps(payload, ensure_ascii=False)}\n-->"
 
 
@@ -88,6 +92,9 @@ def parse_state_comment(body: str) -> PipelineState:
     approach: Approach | None = None
     subtask_plan: SubtaskPlan | None = None
     subtask_index = int(payload.get("subtask_index") or 0)
+    checkpoint_completed: int | None = None
+    if "checkpoint_completed" in payload:
+        checkpoint_completed = max(0, int(payload.get("checkpoint_completed") or 0))
     try:
         if payload.get("investigation") is not None:
             investigation = Investigation.model_validate(payload.get("investigation"))
@@ -110,6 +117,7 @@ def parse_state_comment(body: str) -> PipelineState:
         approach=approach,
         subtask_plan=subtask_plan,
         subtask_index=max(0, subtask_index),
+        checkpoint_completed=checkpoint_completed,
         resume_mode=str(resume_mode) if resume_mode else None,
     )
 

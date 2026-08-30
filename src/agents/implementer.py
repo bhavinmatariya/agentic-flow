@@ -225,6 +225,11 @@ class ImplementerAgent(BaseAgent):
         self._edit_failures: dict[str, int] = {}
         self._active_repo_session: RepositorySession | None = None
 
+    @property
+    def last_committed_paths(self) -> frozenset[str]:
+        """Paths successfully committed via edit_file in the last implement() call."""
+        return self._last_committed_paths
+
     def create_repository_session(
         self,
         primary_repo: str,
